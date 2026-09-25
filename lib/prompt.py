@@ -954,7 +954,9 @@ def handoff_directive(context: PromptContext, agent: int) -> str:
     return "\n".join(lines)
 
 
-def _peer_holds_a_lease(context: PromptContext, agent: int) -> bool:
+def _peer_holds_a_lease(
+    context: PromptContext, agent: int, *, strategy: str = "",
+) -> bool:
     """Whether another worker currently leases a work card.
 
     Only then would unassigned review duplicate an owner's work. A queue whose
@@ -972,10 +974,19 @@ def _peer_holds_a_lease(context: PromptContext, agent: int) -> bool:
         return any(
             workqueue.claim_blocks_card(row, ttl, now)
             and str(row.get("agent", "")) != str(agent)
+            and (not strategy or row.get("strategy") == strategy)
             for row in workqueue.latest_claims_by_card(queue_context).values()
         )
     except (OSError, ValueError):
         return False
+
+
+def fuzz_lead_available(context: PromptContext, agent: int) -> bool:
+    """An unreplayed artifact is work only if no peer owns its S4 card."""
+    return (
+        not fuzz_leads_empty(context.results_dir)
+        and not _peer_holds_a_lease(context, agent, strategy="S4")
+    )
 
 
 def cold_start_prompt(context: PromptContext, agent: int) -> str:
@@ -1008,11 +1019,11 @@ def cold_start_prompt(context: PromptContext, agent: int) -> str:
         queue_has_cards and not card_directive
         and _peer_holds_a_lease(context, agent)
         and not handoff_rows(context, agent)
-        and fuzz_leads_empty(context.results_dir)
+        and not fuzz_lead_available(context, agent)
     ):
         workflow = (
             "No work card is assigned: the eligible queue is already leased by "
-            "another worker, and no handoff row or fuzz lead is waiting. Do not "
+            "another worker, and no handoff row or unowned fuzz lead is waiting. Do not "
             "inspect the target or create an unassigned hypothesis; end this "
             "model session so the worker pool can reuse the slot after "
             "structured state changes."

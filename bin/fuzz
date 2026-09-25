@@ -43,7 +43,6 @@ import callgraph  # noqa: E402
 import cli_help  # noqa: E402
 import fuzz_campaign  # noqa: E402
 import fuzz_harness  # noqa: E402
-import native_symbols  # noqa: E402
 import sanitizer as sanitizer_lib  # noqa: E402
 import target_config  # noqa: E402
 
@@ -98,27 +97,13 @@ def chosen_sanitizer(config: target_config.Config, requested: str,
 
 
 def exported_symbols(config: target_config.Config, sanitizer: str) -> "set[str]":
-    """What the target's build publishes, from the artifact it publishes it in.
+    """What the libraries a harness links publish.
 
-    Reads the same library a harness will link — `coverage_library`'s choice,
-    not the plain path — so the gate and the build never disagree about what
-    is exported. They can: a target whose only coverage-instrumented tree is
-    the sibling would otherwise have every candidate rejected as "not
-    exported" while `bin/fuzz build` happily linked it.
-
-    The library is the API surface; the executable is a fallback for a target
-    that ships only a CLI. An empty answer is reported rather than silently
-    turning the gate into a pass-through.
+    A thin primary library can export nothing while its configured link peers
+    publish the API. Read the coverage sibling's actual link set, as build and
+    replay do, so candidate admission follows the callable surface.
     """
-    candidates_paths = [fuzz_harness.coverage_library(config, sanitizer).path]
-    raw = config.sanitizer_bin(sanitizer)
-    candidates_paths.append(config.resolve_path(raw) if raw else "")
-    for resolved in candidates_paths:
-        if resolved and Path(resolved).is_file():
-            found = native_symbols.defined_symbols(Path(resolved), exported_only=True)
-            if found:
-                return found
-    return set()
+    return fuzz_harness.linked_exports(config, sanitizer)
 
 
 def hold_shared_build(config: target_config.Config,
@@ -216,8 +201,8 @@ def cmd_candidates(args) -> int:
     exported = exported_symbols(config, sanitizer)
     if not exported:
         say(f"no exported symbols readable from the {sanitizer} build; "
-            f"candidate generation needs a built native library or binary "
-            f"(target.toml {sanitizer}_lib / {sanitizer}_bin)")
+            f"candidate generation needs a built native library a harness "
+            f"can link (target.toml {sanitizer}_lib and its link_libs peers)")
         return 3
     declarations = fuzz_harness.declaration_index(
         config.target_root,
@@ -411,9 +396,14 @@ def cmd_template(args) -> int:
             say(f"  - {blocker}")
         say("Pass --force only if you can name why the gate is wrong here.")
         return 3
+    # A C export may live in a C++ target. Its configured standard applies to
+    # every harness compile, so a .c template would fail before it can run.
+    cpp_target = any(
+        flag.startswith("-std=") and "++" in flag for flag in config.defines
+    )
     destination = Path(args.output) if args.output else (
         fuzz_harness.source_dir(config.results_dir)
-        / f"fuzz_{source_name}.{'cc' if args.symbol in qualified else 'c'}")
+        / f"fuzz_{source_name}.{'cc' if args.symbol in qualified or cpp_target else 'c'}")
     destination.parent.mkdir(parents=True, exist_ok=True)
     fuzz_harness.reject_in_tree_source(destination, config.target_root)
     if destination.exists() and not args.force:

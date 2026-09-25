@@ -142,6 +142,21 @@ class ProbeCppHarnessTests(unittest.TestCase):
         second = self.run_probe(CXX=compiler)
         self.assertIn("built harness:", second.stdout + second.stderr)
 
+    def test_a_rebuilt_linked_peer_invalidates_the_probe_binary(self) -> None:
+        peer = self.target / "build" / "libpeer.a"
+        shutil.copyfile(self.library, peer)
+        config_path = self.slug_dir / "target.toml"
+        config_path.write_text(config_path.read_text().replace(
+            "link_libs = []", 'link_libs = ["build/libpeer.a"]'))
+        compiler = self.fake_compiler()
+        first = self.run_probe(CXX=compiler)
+        self.assertIn("built harness:", first.stdout + first.stderr)
+        self.assertNotIn("built harness:", self.run_probe(CXX=compiler).stdout)
+        previous = peer.stat()
+        os.utime(peer, ns=(previous.st_atime_ns, previous.st_mtime_ns + 1_000_000_000))
+        second = self.run_probe(CXX=compiler)
+        self.assertIn("built harness:", second.stdout + second.stderr)
+
     def test_a_link_libs_source_builds_with_the_target_includes_and_defines(self) -> None:
         (self.target / "include").mkdir()
         (self.target / "include" / "support.h").write_text(

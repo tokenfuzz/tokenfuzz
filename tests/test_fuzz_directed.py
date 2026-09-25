@@ -19,6 +19,8 @@ running:
 from __future__ import annotations
 
 import hashlib
+import importlib.machinery
+import importlib.util
 import json
 import os
 import shutil
@@ -27,6 +29,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -373,6 +376,25 @@ class HarnessInputAgreementTests(unittest.TestCase):
                 fuzz_harness.declared_exports(configuration, "asan"), (2, 1),
             )
 
+    def test_a_thin_primary_does_not_hide_a_linked_peers_public_api(self) -> None:
+        configuration, root = self.config("build-asan/libfront.a", ["api"])
+        configuration.link_libs = ["build-asan/libapi.a"]
+        for name in ("libfront.a", "libapi.a"):
+            (root / "build-asan" / name).write_bytes(b"!<arch>\n")
+
+        def symbols(path, *, exported_only=False):
+            return {"app_parse"} if Path(path).name == "libapi.a" else set()
+
+        with mock.patch.object(
+            fuzz_harness.native_symbols, "defined_symbols", side_effect=symbols,
+        ):
+            self.assertEqual(
+                fuzz_harness.declared_exports(configuration, "asan"), (1, 1),
+            )
+            self.assertEqual(
+                fuzz_harness.linked_exports(configuration, "asan"), {"app_parse"},
+            )
+
     def test_includes_that_resolve_to_no_header_are_reported(self) -> None:
         # The shipped shape: `includes` names the build directory, which exists
         # and holds no header.
@@ -458,6 +480,14 @@ class SymbolFamilyTests(unittest.TestCase):
             {"_Z9app_parsePKcm": "app_parse", "_Z5otherv": "other"})
         self.assertEqual(driven, {"_Z9app_parsePKcm"})
 
+    def test_an_unrelated_bare_call_does_not_cover_a_cpp_method(self) -> None:
+        exported = {"_ZN6sample6Reader5inputEv"}
+        qualified = {"_ZN6sample6Reader5inputEv": "sample::Reader::input"}
+        self.assertEqual(fuzz_harness._driven(
+            {"input"}, exported, qualified, set()), set())
+        self.assertEqual(fuzz_harness._driven(
+            {"input"}, exported, qualified, {"Reader::input"}), exported)
+
     def test_same_named_methods_are_distinct_identities(self) -> None:
         # A::parse and B::parse share a bare identifier. The header index
         # cannot say which class a `parse` prototype belongs to, so neither
@@ -534,6 +564,14 @@ class SymbolFamilyTests(unittest.TestCase):
             self.assertEqual(
                 fuzz_harness.source_identifiers({"_ZN6sample3BoxC1Ev", "_ZN6sample3BoxD1Ev"}),
                 {"_ZN6sample3BoxC1Ev": "sample::Box::Box"})
+
+    def test_a_conversion_operator_does_not_become_a_bare_type_name(self) -> None:
+        symbol = "_ZNK6sample6ReadercvmEv"
+        with mock.patch.object(
+            fuzz_harness.symbol_names, "demangle_text",
+            return_value="sample::Reader::operator unsigned long() const\n",
+        ):
+            self.assertEqual(fuzz_harness.source_identifiers({symbol}), {})
 
     def test_template_and_candidates_resolve_an_export_the_same_way(self) -> None:
         declarations = {"app_parse": "int app_parse(const char *, size_t);"}
@@ -833,6 +871,35 @@ class HarnessReceiptTests(unittest.TestCase):
         self.assertEqual(old.warnings, [])
 
 
+class TemplateLanguageTests(unittest.TestCase):
+    def test_a_c_export_uses_cpp_when_target_flags_require_cpp(self) -> None:
+        loader = importlib.machinery.SourceFileLoader(
+            "fuzz_cli_test", str(ROOT / "bin" / "fuzz"))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        assert spec is not None
+        module = importlib.util.module_from_spec(spec)
+        loader.exec_module(module)
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw) / "target"
+            (root / "api").mkdir(parents=True)
+            (root / "api" / "pub.h").write_text(
+                "int app_parse(const unsigned char *data, size_t size);\n")
+            config = config_for(root, ["bytes"])
+            config.includes = ["api"]
+            config.defines = ["-std=gnu++20"]
+            args = SimpleNamespace(
+                results_dir=config.results_dir, sanitizer="asan",
+                symbol="app_parse", output="", target="", hypothesis_id="",
+                force=False,
+            )
+            with (mock.patch.object(module, "load_config", return_value=config),
+                  mock.patch.object(module, "exported_symbols",
+                                    return_value={"app_parse"})):
+                self.assertEqual(module.cmd_template(args), 0)
+            self.assertTrue(
+                (Path(config.results_dir) / "fuzz/src/fuzz_app_parse.cc").is_file())
+
+
 class BuildIsolationTests(unittest.TestCase):
     """Nothing S4 does may make the shared build look stale to a peer."""
 
@@ -884,6 +951,26 @@ class BuildIsolationTests(unittest.TestCase):
         self.assertIn("-fsanitize=fuzzer,address", command)
         self.assertIn(str(Path(raw) / "support.c"), command)
         self.assertIn("-lm", command)
+
+    def test_a_rebuilt_linked_peer_invalidates_the_fuzzer_binary(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            (root / "build-asan").mkdir()
+            source = root / "fuzz_app.c"
+            source.write_text("int LLVMFuzzerTestOneInput(void) { return 0; }\n")
+            primary = root / "build-asan/libfront.a"
+            peer = root / "build-asan/libapi.a"
+            primary.write_bytes(b"!<arch>\n")
+            peer.write_bytes(b"!<arch>\n")
+            config = config_for(root, ["bytes"])
+            config.link_libs = ["build-asan/libapi.a"]
+            before = fuzz_harness.build_identity(
+                source, "asan", config, str(primary), [])
+            previous = peer.stat()
+            os.utime(peer, ns=(previous.st_atime_ns, previous.st_mtime_ns + 1_000_000_000))
+            after = fuzz_harness.build_identity(
+                source, "asan", config, str(primary), [])
+            self.assertNotEqual(before, after)
 
 
 class SliceReadingTests(unittest.TestCase):
@@ -1688,6 +1775,24 @@ class CoverageLibraryTests(unittest.TestCase):
         self.assertEqual(fresh.tree, "build-asan+fuzz")
         self.assertEqual(stale.tree, "build-asan")
         self.assertIn("different source", stale.remedy)
+
+    def test_a_thin_primary_uses_its_linked_peers_coverage(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            for tree in ("build-asan", "build-asan+fuzz"):
+                (root / tree).mkdir()
+                for name in ("libfront.a", "libapi.a"):
+                    (root / tree / name).write_bytes(b"!<arch>\n")
+            config = config_for(root, ["bytes"])
+            config.asan_lib = "build-asan/libfront.a"
+            config.link_libs = ["build-asan/libapi.a"]
+            with mock.patch.object(
+                fuzz_harness, "is_coverage_instrumented",
+                side_effect=lambda path: Path(path).name == "libapi.a",
+            ):
+                choice = fuzz_harness.coverage_library(config, "asan")
+        self.assertEqual(choice.tree, "build-asan+fuzz")
+        self.assertTrue(choice.instrumented)
 
 
 class ChosenSanitizerTests(unittest.TestCase):

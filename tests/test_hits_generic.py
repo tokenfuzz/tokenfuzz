@@ -360,6 +360,39 @@ class GenericCoverageTests(unittest.TestCase):
         self.assertEqual(
             list((self.results / ".hits-cache").glob("harness.c.*.cov")), twins)
 
+    def test_a_thin_primary_uses_coverage_in_its_linked_peer(self) -> None:
+        # Setup verifies this sibling through libapp, so the probe route must
+        # select it through that same link set.
+        self._archive(self.target / "main.c", self.plain / "libfront.a",
+                      instrumented=False)
+        self._archive(self.target / "main.c", self.sibling / "libfront.a",
+                      instrumented=False)
+        config_path = self.results.parent.parent / "target.toml"
+        config_path.write_text(TARGET_TOML.replace(
+            'asan_lib = "build-asan/libapp.a"',
+            'asan_lib = "build-asan/libfront.a"\n'
+            'link_libs = ["build-asan/libapp.a"]'))
+        source, binary = self._harness_route()
+        result = self._run_hits(
+            "app_parse", environment={"ASAN_GENERIC_BIN": str(binary)},
+            extra=["--harness-source", str(source)],
+        )
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, output)
+        self.assertIn("HIT: app_parse", output)
+        first_twins = list((self.results / ".hits-cache").glob("harness.c.*.cov"))
+        self.assertEqual(len(first_twins), 1)
+        peer = self.sibling / "libapp.a"
+        previous = peer.stat()
+        os.utime(peer, ns=(previous.st_atime_ns, previous.st_mtime_ns + 1_000_000_000))
+        again = self._run_hits(
+            "app_parse", environment={"ASAN_GENERIC_BIN": str(binary)},
+            extra=["--harness-source", str(source)],
+        )
+        self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
+        self.assertEqual(
+            len(list((self.results / ".hits-cache").glob("harness.c.*.cov"))), 2)
+
     def test_a_harness_that_never_enters_the_library_is_named_not_a_symbolizer_failure(self) -> None:
         """A harness that drives the plain CLI as a subprocess measures nothing.
 

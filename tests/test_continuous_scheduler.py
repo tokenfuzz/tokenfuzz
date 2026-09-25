@@ -157,6 +157,33 @@ class ContinuousSchedulerTests(unittest.TestCase):
         self.assertEqual(h.barriers, 1, "exactly one full barrier, after the drain")
         self.assertIn(status, ("dry", "stalled", "budget"))
 
+    def test_an_idle_primary_does_not_relaunch_at_each_steward_tick(self) -> None:
+        h = _Harness(self.root)
+
+        def agent(number, cold):
+            if number == 2:
+                time.sleep(1.2)
+            return h.result(number)
+
+        def skip(_runtime, _context, _agent, *, primary_always_launches=True):
+            return not primary_always_launches
+
+        with h.patched(agent, skip_launch=skip), \
+             mock.patch.dict(os.environ, {"STEWARD_INTERVAL_SECS": "1"}):
+            audit_runner.run_continuous(h.state)
+        self.assertEqual([number for number, _cold, _limit in h.calls].count(1), 1)
+
+    def test_a_fuzz_lead_does_not_wake_a_slot_while_a_peer_owns_its_card(self) -> None:
+        h = _Harness(self.root)
+        h.runtime.results = self.root
+        h.state.context.results_dir = self.root
+        (self.root / "fuzz-leads.md").write_text("# Leads\nartifact\n")
+        with mock.patch.object(audit_runner.structured_state, "agent_counts", return_value=None), \
+             mock.patch.object(audit_runner.prompt, "handoff_rows", return_value=[]), \
+             mock.patch.object(audit_runner.prompt, "_peer_holds_a_lease", return_value=True):
+            self.assertTrue(audit_runner.should_skip_launch(
+                h.runtime, h.state.context, 2, primary_always_launches=False))
+
     def test_a_provider_halt_stops_launches_drains_and_reports(self) -> None:
         h = _Harness(self.root)
         peer_running = threading.Event()

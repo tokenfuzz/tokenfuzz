@@ -40,18 +40,19 @@ under `$RESULTS_DIR/fuzz/`:
 
 ## Only three facts admit an API
 
-`bin/fuzz candidates` admits a symbol when all three hold, each read from a
-structured source rather than guessed:
+`bin/fuzz candidates` admits a symbol when all three checks hold. Header and
+harness call-site scanning is syntactic, so review the reported declaration
+and existing harness before writing a new one:
 
-1. **Published**: present in the sanitizer build's exported symbol table and
-   not a reserved (`_`-prefixed) identifier. The second half matters for a
-   target whose `<san>_lib` is a static archive: an archive has no export
+1. **Published**: present in the exported symbol table of `<san>_lib` or a
+   configured linked library, and not a reserved (`_`-prefixed) identifier.
+   The second half matters for a static archive: an archive has no export
    list, so `nm` reports every cross-file helper as global.
 2. **Untrusted-reachable**: its declaration in a public header carries a
    parameter shape the target's `[threat_model].attacker_controls` can supply.
    `bytes` reaches a buffer+length, a string, or a stream; `fs-state` reaches
    a path; `call-sequence` reaches an opaque handle.
-3. **Uncovered**: no harness in the tree already drives it.
+3. **Uncovered**: no harness in the tree has an identifiable call to it.
 
 Rejections are reported with their reason, so an empty result is diagnostic:
 
@@ -151,12 +152,14 @@ isolation:      OK — every campaign artifact is outside the checkout
 
 ## Giving it coverage feedback
 
-libFuzzer needs SanitizerCoverage counters *inside the target library* to
+libFuzzer needs SanitizerCoverage counters *inside a linked target library* to
 guide mutations through target code. An ordinary `build-<san>/` usually has
 none, so a fuzzer linked against one is **blind to target internals**. It may
 still find shallow faults, and totals can move because the harness
 translation unit has its own counters. Changes in those totals alone do not
-prove the target library is providing guidance.
+prove the target library is providing guidance. A guided status means at least
+one linked library has counters; inspect the build if the API under test lives
+in a different, uninstrumented library.
 
 The shared tree is never rebuilt for that. When ASan is available,
 `bin/setup-target <target> --build` and audit preflight automatically build

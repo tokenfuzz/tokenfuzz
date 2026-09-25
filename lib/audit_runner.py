@@ -2609,7 +2609,7 @@ def should_skip_launch(
             return False
         if card is not None:
             return False
-    return prompt.fuzz_leads_empty(runtime.results)
+    return not prompt.fuzz_lead_available(context, agent)
 
 
 def all_work_sources_exhausted(
@@ -4280,7 +4280,9 @@ def run_continuous(state: BackendState) -> tuple[str, list[AgentResult]]:
             if not initial and ceiling_reached():
                 return False
             if result is None:
-                return not should_skip_launch(runtime, context, agent)
+                return not should_skip_launch(
+                    runtime, context, agent, primary_always_launches=initial,
+                )
             outcome = _refill_outcome(result)
             if outcome in ("provider", "deadline"):
                 index_log(runtime, f"slot {agent}: idle after {outcome} outcome rc={result.returncode}")

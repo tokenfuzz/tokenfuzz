@@ -284,13 +284,9 @@ def _linked_libraries(config, library: Path) -> "list[Path]":
     tree = library.parent
     while tree.parent != tree and not tree.name.startswith("build-"):
         tree = tree.parent
-    peers = [
-        Path(value) for value in fuzz_harness.sibling_link_inputs(config, str(library))
-        if Path(value).suffix in (".a", ".dylib", ".so") or ".so." in Path(value).name
-    ]
-    return [library] + [
-        peer for peer in peers
-        if peer.is_file() and tree in peer.parents and peer != library
+    return [
+        linked for linked in fuzz_harness.linked_libraries(config, str(library))
+        if linked == library or tree in linked.parents
     ]
 
 

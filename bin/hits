@@ -352,8 +352,11 @@ class Hits:
             candidate = coverage_build.sibling_path(self.config, raw, "asan", suffix)
             if candidate is None or not candidate.is_file():
                 continue
-            if (fuzz_harness.is_coverage_instrumented(candidate)
-                    or has_sancov_section(candidate)):
+            if any(
+                fuzz_harness.is_coverage_instrumented(linked)
+                or has_sancov_section(linked)
+                for linked in coverage_build._linked_libraries(self.config, candidate)
+            ):
                 stale = coverage_build.stale_reason(self.target_root, "asan", suffix)
                 if stale:
                     stale_reasons.append(stale)
@@ -383,9 +386,10 @@ class Hits:
         except OSError:
             compiler_stat = compiler_path
         identity = "\n".join((
-            "schema=1", f"source={hashlib.sha1(source.read_bytes()).hexdigest()}",
+            "schema=2", f"source={hashlib.sha1(source.read_bytes()).hexdigest()}",
             f"compiler={compiler_path}", f"compiler_stat={compiler_stat}",
             f"flags={flags}", f"library={library}", f"library_stat={stat_key(library)}",
+            f"linked_input_stats={fuzz_harness.linked_input_stats(self.config, str(library))}",
             f"includes={self.config.includes}", f"defines={self.config.defines}",
             f"links={self.config.resolved_link_libs()}",
             f"ldflags={os.environ.get('LDFLAGS', '')}",

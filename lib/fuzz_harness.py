@@ -166,8 +166,8 @@ def _driven(calls: "set[str]", exported: "set[str]",
 
     A mangled C++ export is credited by its qualified name: a harness call
     spelled `A::parse(` reaches `ns::A::parse` and not `ns::B::parse`. A bare
-    `parse(` (a member call) credits it only when no other export shares the
-    identifier, or one harness would hide every same-named method.
+    call can credit a global C++ function, but cannot identify a method:
+    unrelated harnesses routinely call methods named `input` or `write`.
     """
     qualified = qualified or {}
     aliases = suffix_aliases(exported)
@@ -175,7 +175,7 @@ def _driven(calls: "set[str]", exported: "set[str]",
         aliases[name] for name in calls if name in aliases
     } | {
         symbol for symbol, name in unique_identifiers(qualified, exported).items()
-        if name in calls
+        if name in calls and "::" not in qualified[symbol]
     } | {
         symbol for symbol, name in qualified.items()
         for call in (qualified_calls or ())
@@ -839,6 +839,7 @@ _QUALIFIED_TAIL_RE = re.compile(r"((?:[A-Za-z_]\w*::)*~?[A-Za-z_]\w*)\s*$")
 # `vtable for ns::Doc`, `guard variable for ns::f()::x`: compiler-emitted
 # data named after a class or function, never a callable of that name.
 _SPECIAL_NAME_RE = re.compile(r"^[A-Za-z0-9# -]+ for ")
+_OPERATOR_NAME_RE = re.compile(r"(?:^|::)operator\b")
 
 
 def source_identifiers(symbols: "Iterable[str]") -> "dict[str, str]":
@@ -863,6 +864,10 @@ def source_identifiers(symbols: "Iterable[str]") -> "dict[str, str]":
         if display == symbol or "(" not in display or _SPECIAL_NAME_RE.match(display):
             continue
         head = display.split("(", 1)[0]
+        # A conversion operator's tail is its result type, not a callable
+        # source name; treating it as `long` can credit an unrelated cast.
+        if _OPERATOR_NAME_RE.search(head):
+            continue
         while (stripped := _TEMPLATE_ARGS_RE.sub("", head)) != head:
             head = stripped
         match = _QUALIFIED_TAIL_RE.search(head)
@@ -1266,6 +1271,28 @@ def is_coverage_instrumented(artifact: "str | os.PathLike") -> bool:
     )
 
 
+def linked_libraries(config, library: str) -> "list[Path]":
+    """Existing libraries the harness links, including peers of a thin primary."""
+    primary = Path(library)
+    if not primary.is_file():
+        return []
+    peers = [
+        Path(value) for value in sibling_link_inputs(config, library)
+        if Path(value).suffix in {".a", ".dylib", ".so", ".lib", ".dll"}
+        or ".so." in Path(value).name
+    ]
+    return list(dict.fromkeys([primary, *(peer for peer in peers if peer.is_file())]))
+
+
+def linked_exports(config, sanitizer: str) -> "set[str]":
+    """Callable exports from the same library set a fuzz harness links."""
+    library = coverage_library(config, sanitizer).path
+    exported: set[str] = set()
+    for path in linked_libraries(config, library):
+        exported.update(native_symbols.defined_symbols(path, exported_only=True))
+    return exported
+
+
 @dataclass
 class LibraryChoice:
     path: str
@@ -1284,10 +1311,7 @@ def declared_exports(config, sanitizer: str) -> "tuple[int, int]":
     may report or rank this signal; it is not proof that a different artifact is
     the product.
     """
-    library = coverage_library(config, sanitizer).path
-    if not library or not Path(library).is_file():
-        return 0, 0
-    exported = native_symbols.defined_symbols(Path(library), exported_only=True)
+    exported = linked_exports(config, sanitizer)
     if not exported:
         return 0, 0
     index = declaration_index(
@@ -1350,10 +1374,16 @@ def coverage_library(config, sanitizer: str) -> LibraryChoice:
         )
         if not stale:
             return LibraryChoice(
-                str(sibling), sibling_tree, is_coverage_instrumented(sibling))
-    instrumented = is_coverage_instrumented(plain)
+                str(sibling), sibling_tree, any(
+                    is_coverage_instrumented(path)
+                    for path in linked_libraries(config, str(sibling))
+                ))
+    instrumented = any(
+        is_coverage_instrumented(path)
+        for path in linked_libraries(config, plain)
+    )
     return LibraryChoice(plain, tree, instrumented, remedy=stale or ("" if instrumented else (
-        f"{Path(plain).name} carries no SanitizerCoverage, so libFuzzer will "
+        f"{Path(plain).name} and its linked libraries carry no SanitizerCoverage, so libFuzzer will "
         f"run blind — it cannot tell that an input reached new code. "
         f"`bin/setup-target --build` builds a sibling tree with coverage on "
         f"(see .audit/build-materialize-{sanitizer}{COVERAGE_TREE_SUFFIX}.log "
@@ -1704,6 +1734,24 @@ def sibling_link_inputs(config, library: str) -> "list[str]":
     return result
 
 
+def linked_input_stats(config, library: str) -> list[tuple]:
+    """Metadata for linked files that can change a cached harness binary."""
+    result = []
+    for value in [library, *sibling_link_inputs(config, library)]:
+        if not value or value.startswith("-"):
+            continue
+        path = Path(value)
+        try:
+            if not path.is_file():
+                continue
+            item = path.stat()
+        except OSError:
+            continue
+        result.append((str(path), item.st_dev, item.st_ino, item.st_size,
+                       item.st_mtime_ns, item.st_ctime_ns))
+    return result
+
+
 # Source inputs a target may list among `link_libs` (target_config accepts
 # them as link inputs, any case); each is compiled beside the harness before
 # the link. Assembly included: it is preprocessed against the same defines.
@@ -1793,23 +1841,19 @@ def build_identity(source: Path, san: str, config, library: str,
     """Content identity of everything the built fuzzer depends on.
 
     Same discipline as bin/probe's harness cache: a rebuild is skipped only
-    when the source, the compiler, the sanitizer, the linked library's stat,
+    when the source, the compiler, the sanitizer, the linked inputs' stats,
     and every configured flag are unchanged. A stale binary silently fuzzing
     an older library is the one cache failure that would corrupt results
     rather than merely waste time.
     """
     compiler = compiler_for(source)
-    try:
-        stat = Path(library).stat() if library else None
-    except OSError:
-        stat = None
     parts = (
-        "schema=2",
+        "schema=3",
         f"source={hashlib.sha1(source.read_bytes()).hexdigest()}",
         f"compiler={shutil.which(compiler) or compiler}",
         f"sanitizer={san}",
-        f"library={library}:{stat.st_size if stat else '-'}:"
-        f"{stat.st_mtime_ns if stat else '-'}",
+        f"library={library}",
+        f"linked_input_stats={linked_input_stats(config, library)}",
         f"includes={config.includes}", f"defines={config.defines}",
         f"links={sibling_link_inputs(config, library)}", f"flags={flags}",
         f"ldflags={os.environ.get('LDFLAGS', '')}",

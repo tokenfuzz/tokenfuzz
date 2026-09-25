@@ -549,11 +549,25 @@ class SharedPolicyAgreementTests(unittest.TestCase):
                 "# Fuzz leads\n\n- crash-000 reached app_parse\n", encoding="utf-8",
             )
             with_lead = prompt.cold_start_prompt(context, 1)
+            workqueue.write_cards(results / "work-cards.jsonl", [{
+                "id": "FUZZ-ONLY", "kind": "s4-campaign", "file": "",
+                "subsystem": "(target)", "strategy": "S4", "mode": "generic",
+                "score": 1, "reason": "boundary fuzzing", "auditable": True,
+            }])
+            self.assertIsNotNone(workqueue.claim_next_card(
+                queue_context, "2", "generic", "reproduce", strategy="S4"))
+            s4_context = prompt.PromptContext(
+                results_dir=results, target_root=target,
+                target_slug="sampleproj", reference_dir=references,
+                num_agents=3, fixed_strategy="S4",
+            )
+            owned_lead = prompt.cold_start_prompt(s4_context, 1)
 
         self.assertIn("No work card is assigned", rendered)
         self.assertIn("Do not inspect the target", rendered)
         self.assertNotIn("fill the same-subsystem queue to 3-5 hypotheses", rendered)
         self.assertNotIn("No work card is assigned", with_lead)
+        self.assertIn("No work card is assigned", owned_lead)
 
     def test_a_dry_queue_keeps_the_primary_discovery_slot(self) -> None:
         # Nobody leases anything: the only card is blocked. Telling agent 1 to
