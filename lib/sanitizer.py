@@ -34,6 +34,11 @@ FUZZER_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 #: Wall a symbolizer gets before the report is kept as it is. Shared with
 #: bin/hits' batched call so a wedged tool costs one budget, not two.
 SYMBOLIZE_TIMEOUT_SECONDS = 60
+#: Wall for the one pass a filed crash report gets outside any probe
+#: (`symbolized_copy`, run by bin/export-repro). A very large library can
+#: outlast the in-probe budget on every run; this pass runs once per bundle
+#: and its result is cached, so it can afford to wait for the symbolizer.
+REPORT_SYMBOLIZE_TIMEOUT_SECONDS = 600
 #: A path a repeated-run driver exports to its per-run children. The first
 #: symbolizer timeout creates it, and later runs keep raw frames instead of
 #: paying the same timeout again: a very large library timed out on every run
@@ -220,7 +225,10 @@ def symbolize_available() -> bool:
     return (Path(tool).is_file() and os.access(tool, os.X_OK)) or bool(shutil.which("atos") or shutil.which("addr2line"))
 
 
-def symbolize_file(path: str | os.PathLike[str], *, full_path: bool = False) -> bool:
+def symbolize_file(
+    path: str | os.PathLike[str], *, full_path: bool = False,
+    timeout: int | None = None,
+) -> bool:
     """Rewrite a sanitizer report in place with source locations.
 
     ``full_path`` asks the platform symbolizer for full source paths; coverage
@@ -234,6 +242,9 @@ def symbolize_file(path: str | os.PathLike[str], *, full_path: bool = False) -> 
     """
     import tempfile
 
+    # Read at call time: a caller may lower the module constant.
+    if timeout is None:
+        timeout = SYMBOLIZE_TIMEOUT_SECONDS
     report = Path(path)
     if not report.is_file() or not report.stat().st_size or not SYMBOLIZER.is_file():
         return False
@@ -257,7 +268,7 @@ def symbolize_file(path: str | os.PathLike[str], *, full_path: bool = False) -> 
     with tempfile.NamedTemporaryFile() as rendered, report.open("rb") as source:
         completed = subprocess.run(
             [sys.executable, str(Path(__file__).with_name("timeout.py")),
-             str(SYMBOLIZE_TIMEOUT_SECONDS), "TERM", "0", *args],
+             str(timeout), "TERM", "0", *args],
             stdin=source,
             stdout=rendered,
             stderr=subprocess.PIPE,
@@ -273,7 +284,7 @@ def symbolize_file(path: str | os.PathLike[str], *, full_path: bool = False) -> 
                         f"[sanitizer] WARN: symbolizer timeout could not be "
                         f"remembered for later runs: {exc}", file=sys.stderr,
                     )
-            _warn_unsymbolized(report, completed)
+            _warn_unsymbolized(report, completed, timeout=timeout)
             return False
         # Replaced, never truncated in place: this rewrites saved evidence now,
         # not just a runner's scratch output, and a write interrupted halfway
@@ -289,8 +300,66 @@ def symbolize_file(path: str | os.PathLike[str], *, full_path: bool = False) -> 
     return True
 
 
+# The module path in a raw frame's trailer: `(/path/lib.dylib:arm64+0x84f30)`.
+_RAW_FRAME_MODULE = re.compile(r"\(([^()]+?)(?::[A-Za-z0-9_]+)?\+0x[0-9a-f]+\)\s*$")
+
+
+def symbolized_copy(
+    report: Path, cache_dir: Path,
+    budget: int = REPORT_SYMBOLIZE_TIMEOUT_SECONDS,
+) -> Path:
+    """A symbolized copy of a filed report, or the report itself.
+
+    The report is never rewritten: a filed bundle's crash state is derived
+    from it, and that dedup identity must not change after filing. The copy
+    is for the human-facing report only. It is cached in `cache_dir` under
+    the raw report's digest, so the long symbolizer wall is paid once per
+    bundle, failed or not. A module rebuilt after the report was written
+    would symbolize addresses against different code, so such a report is
+    kept raw rather than mislabelled. A caller bounded by a deadline passes a
+    smaller `budget`; a failure under a cut budget is not cached, so a later
+    export with time to spare retries it.
+    """
+    import hashlib
+
+    raw = report.read_bytes()
+    text = raw.decode(errors="replace")
+    if not RAW_FRAME.search(text):
+        return report
+    cached = cache_dir / f".symbolized-{hashlib.sha256(raw).hexdigest()[:16]}.txt"
+    if cached.is_file():
+        return cached
+    written = report.stat().st_mtime
+    rebuilt = sorted({
+        match.group(1) for line in text.splitlines()
+        if RAW_FRAME.match(line) and (match := _RAW_FRAME_MODULE.search(line))
+        and os.path.isfile(match.group(1))
+        and os.path.getmtime(match.group(1)) > written
+    })
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    staged = cached.with_name(f"{cached.name}.{os.getpid()}.tmp")
+    staged.write_bytes(raw)
+    if rebuilt:
+        print(
+            f"[sanitizer] WARN: {report.name} keeps unsymbolized frames "
+            f"({', '.join(Path(module).name for module in rebuilt)} rebuilt "
+            "since it was written)", file=sys.stderr,
+        )
+    elif budget <= 0 or (
+        not symbolize_file(staged, timeout=budget)
+        and budget < REPORT_SYMBOLIZE_TIMEOUT_SECONDS
+    ):
+        staged.unlink(missing_ok=True)
+        return report
+    for stale in cache_dir.glob(".symbolized-*.txt"):
+        stale.unlink(missing_ok=True)
+    os.replace(staged, cached)
+    return cached
+
+
 def _warn_unsymbolized(
     report: Path, completed, *, detail: str = "symbolizer left raw frames",
+    timeout: int | None = None,
 ) -> None:
     """Say that a report kept raw frames, and why, on the runner's stderr."""
     if completed is not None:
@@ -298,7 +367,10 @@ def _warn_unsymbolized(
         reason = tail[-1] if tail else f"rc={completed.returncode}"
         detail = f"symbolizer failed: {reason}"
         if completed.returncode == 124:
-            detail = f"symbolizer timed out after {SYMBOLIZE_TIMEOUT_SECONDS}s"
+            detail = (
+                f"symbolizer timed out after "
+                f"{SYMBOLIZE_TIMEOUT_SECONDS if timeout is None else timeout}s"
+            )
     print(
         f"[sanitizer] WARN: {report.name} keeps unsymbolized frames "
         f"({detail}); some stack frames may lack source lines",

@@ -27,6 +27,7 @@ import languages
 import llm_decide
 import llm_usage
 import report_identity
+import sanitizer as sanitizer_lib
 import stack_frames
 import target_config
 import triage_validate
@@ -139,6 +140,15 @@ def _decision_timeout(default: int, deadline: float | None) -> int:
         return default
     remaining = int(deadline - time.monotonic())
     return max(0, min(default, remaining))
+
+
+def _symbolize_budget_args(deadline: float | None) -> list[str]:
+    """Cap export's one symbolization pass at what is left of the wall."""
+    if deadline is None:
+        return []
+    remaining = max(0, int(deadline - time.monotonic()))
+    budget = min(sanitizer_lib.REPORT_SYMBOLIZE_TIMEOUT_SECONDS, remaining)
+    return ["--symbolize-budget", str(budget)]
 
 
 def _deadline_expired(deadline: float | None) -> bool:
@@ -3082,7 +3092,8 @@ def triage_one_crash(
     if _bundle_needs_refresh(crash_dir) and _decision_timeout(1, deadline):
         _run_tool(
             "export-repro", crash_dir.name, "--crash-dir", str(crash_dir),
-            "--slug", target_slug, env=environment,
+            "--slug", target_slug, *_symbolize_budget_args(deadline),
+            env=environment,
         )
     bundle_missing = _bundle_missing_artifacts(crash_dir)
     if bundle_missing:
@@ -3543,7 +3554,8 @@ def _adjudicate_crash_dirs(
         ):
             _run_tool(
                 "export-repro", directory.name, "--crash-dir", str(directory),
-                "--slug", target_slug, env=environment,
+                "--slug", target_slug, *_symbolize_budget_args(deadline),
+                env=environment,
             )
     # Export rewrites report.md and moves the draft and audit-side caches
     # under .audit/.  Converge only after that boundary so the field decision, trigger

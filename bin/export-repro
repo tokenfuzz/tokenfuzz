@@ -2623,7 +2623,7 @@ def _install_with_exact_case(src: Path, dst: Path) -> None:
     target_lower = dst.name.lower()
     tmp = dst.parent / f"{dst.name}.installing-{os.getpid()}-{secrets.token_hex(4)}"
     try:
-        shutil.copyfile(str(src), str(tmp))
+        shutil.copy2(str(src), str(tmp))
         os.chmod(tmp, 0o644)
         # Remove any case-different sibling so ``os.replace`` produces
         # an entry under the requested case rather than reusing the
@@ -3326,6 +3326,13 @@ def main(argv: list[str]) -> int:
         "--target-rev", metavar="<rev>",
         help="revision the crash was found at (default: the session's audited revision)",
     )
+    # Triage exports inside the audit wall and passes what is left of it, so
+    # a slow symbolizer cannot hold the result pass past the wall.
+    parser.add_argument(
+        "--symbolize-budget", metavar="<seconds>", type=int,
+        default=sanitizer_policy.REPORT_SYMBOLIZE_TIMEOUT_SECONDS,
+        help="wall for the one symbolization pass a raw-frame diagnostic gets",
+    )
     parser.add_argument(
         "-h", "--help", action="store_true",
         help="show this help message and exit",
@@ -3417,6 +3424,12 @@ def main(argv: list[str]) -> int:
         sanitizer_text = asan_file.read_text(encoding="utf-8", errors="replace")
     except OSError:
         sanitizer_text = ""
+    # The report's frames, titles, and surface read a symbolized copy; the
+    # staged sanitizer.txt stays the filed original, whose frames are the
+    # bundle's dedup identity.
+    report_asan = sanitizer_policy.symbolized_copy(
+        asan_file, audit_subdir, args.symbolize_budget,
+    )
     sanitizer = infer_sanitizer_from_text(sanitizer_text)
     run_header = sanitizer_run_header_fields(sanitizer_text)
     run_mode = run_header.get("mode", "")
@@ -3474,7 +3487,9 @@ def main(argv: list[str]) -> int:
             harness_text = strip_internal_headers(harness_src)
             harness_text = rewrite_harness_repo_paths(harness_text)
             (stage / harness_name).write_text(harness_text, encoding="utf-8")
-        shutil.copyfile(asan_file, stage / "sanitizer.txt")
+        # copy2, like the install below: the report's mtime dates it against
+        # a later rebuild of the modules its raw frames name.
+        shutil.copy2(asan_file, stage / "sanitizer.txt")
         # Candidate patch: agents save it as patch.diff next to
         # report.md. Older bundles still have it under .audit/ because
         # _is_bundle_filename used to demote it; scan_dirs already
@@ -3728,12 +3743,12 @@ def main(argv: list[str]) -> int:
             )
 
         # ── Build report.md ──────────────────────────────────────────
-        asan_top = extract_asan_top(asan_file)
-        asan_summary = extract_asan_summary(asan_file)
-        dedup_frames = extract_dedup_frames(asan_file)
-        asan_expected = extract_asan_diagnostic(asan_file)
+        asan_top = extract_asan_top(report_asan)
+        asan_summary = extract_asan_summary(report_asan)
+        dedup_frames = extract_dedup_frames(report_asan)
+        asan_expected = extract_asan_diagnostic(report_asan)
 
-        surface_value, surface_reason = infer_surface(harness_src, asan_file, cfg)
+        surface_value, surface_reason = infer_surface(harness_src, report_asan, cfg)
         primitive_label = infer_primitive_label("\n".join([asan_top, asan_expected, asan_summary]))
 
         trigger_value = ""
@@ -3798,7 +3813,7 @@ def main(argv: list[str]) -> int:
                 severity_value = v
                 break
 
-        confidence_value = read_confidence(field_report_md, asan_file)
+        confidence_value = read_confidence(field_report_md, report_asan)
 
         # Advisory marker: patch.diff is best-effort. When absent + the
         # agent's narrative documents a Fix Direction, the bundle is
