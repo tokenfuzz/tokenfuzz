@@ -484,6 +484,40 @@ class ToolchainShimCompanionTests(unittest.TestCase):
             self.assertFalse((directory / "clang-scan-deps").exists())
 
 
+class ThinPrimaryVerificationTests(unittest.TestCase):
+    """A primary that only forwards to peers is verified by what it links."""
+
+    def _tree(self, root: Path) -> "tuple[SimpleNamespace, Path, Path]":
+        for tree in ("build-asan", "build-asan+fuzz"):
+            lib = root / tree / "lib"
+            lib.mkdir(parents=True)
+            for name in ("libforward.dylib", "libcore.dylib"):
+                (lib / name).write_bytes(b"")
+        config = SimpleNamespace(
+            sanitizer_lib=lambda san: "build-asan/lib/libforward.dylib",
+            resolve_path=lambda raw: str(root / raw),
+            resolved_link_libs=lambda: [str(root / "build-asan/lib/libcore.dylib"), "-lm"],
+        )
+        sibling = root / "build-asan+fuzz" / "lib"
+        return config, sibling / "libforward.dylib", sibling / "libcore.dylib"
+
+    def test_counters_in_a_linked_peer_verify_a_thin_primary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config, primary, peer = self._tree(Path(tmp))
+            symbols = {peer: {"___sanitizer_cov_8bit_counters_init"}, primary: set()}
+            with mock.patch.object(coverage_build.native_symbols, "undefined_symbols",
+                                   side_effect=lambda path: symbols[Path(path)]):
+                self.assertTrue(coverage_build._verify_fuzz_tree(config, "asan", "+fuzz"))
+                symbols[peer] = set()
+                with self.assertRaisesRegex(RuntimeError, "or the peers it links"):
+                    coverage_build._verify_fuzz_tree(config, "asan", "+fuzz")
+                # A rejected guard in any linked library still fails the tree.
+                symbols[peer] = {"___sanitizer_cov_8bit_counters_init"}
+                symbols[primary] = {"___sanitizer_cov_trace_pc_guard_init"}
+                with self.assertRaisesRegex(RuntimeError, "trace-pc-guard"):
+                    coverage_build._verify_fuzz_tree(config, "asan", "+fuzz")
+
+
 class SiblingLinkInputTests(unittest.TestCase):
     def test_peer_libraries_follow_the_primary_into_its_sibling(self) -> None:
         import fuzz_harness

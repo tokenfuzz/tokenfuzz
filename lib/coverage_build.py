@@ -255,13 +255,16 @@ def verify_tree(config, san: str, tree: Path) -> bool:
     if library is not None:
         if not library.is_file():
             raise RuntimeError(f"coverage sibling produced no {library.name}: {library}")
-        if not fuzz_harness.is_coverage_instrumented(library):
-            present, why = sancov_section_present(library)
-            if not present:
-                raise RuntimeError(
-                    f"{why}; the build recipe must honour CC/CXX for the "
-                    "coverage sibling to be instrumented"
-                )
+        if not any(
+            fuzz_harness.is_coverage_instrumented(linked)
+            or sancov_section_present(linked)[0]
+            for linked in _linked_libraries(config, library)
+        ):
+            raise RuntimeError(
+                f"__sancov_guards section not present in {library} or the peers "
+                "it links; the build recipe must honour CC/CXX for the coverage "
+                "sibling to be instrumented"
+            )
         checked = True
     if not checked:
         raise RuntimeError(
@@ -271,22 +274,48 @@ def verify_tree(config, san: str, tree: Path) -> bool:
     return True
 
 
+def _linked_libraries(config, library: Path) -> "list[Path]":
+    """The sibling's primary library and the peers a harness links beside it.
+
+    A primary can be a thin library that only forwards to peers holding the
+    code, so instrumentation is looked for across what a harness actually
+    links from this tree, not in the primary alone.
+    """
+    tree = library.parent
+    while tree.parent != tree and not tree.name.startswith("build-"):
+        tree = tree.parent
+    peers = [
+        Path(value) for value in fuzz_harness.sibling_link_inputs(config, str(library))
+        if Path(value).suffix in (".a", ".dylib", ".so") or ".so." in Path(value).name
+    ]
+    return [library] + [
+        peer for peer in peers
+        if peer.is_file() and tree in peer.parents and peer != library
+    ]
+
+
 def _verify_fuzz_tree(config, san: str, suffix: str) -> bool:
     library = sibling_path(config, config.sanitizer_lib(san), san, suffix)
     if library is None:
         raise RuntimeError(f"target.toml names no {san}_lib to instrument for fuzzing")
     if not library.is_file():
         raise RuntimeError(f"fuzz sibling produced no {library.name}: {library}")
-    undefined = native_symbols.undefined_symbols(library)
-    if not any("sanitizer_cov_8bit_counters_init" in name for name in undefined):
-        raise RuntimeError(
-            f"inline 8-bit counters not present in {library}; the build recipe "
-            "must honour CC/CXX for the fuzz sibling to be instrumented"
+    counted = False
+    for linked in _linked_libraries(config, library):
+        undefined = native_symbols.undefined_symbols(linked)
+        if any("sanitizer_cov_trace_pc_guard" in name for name in undefined):
+            raise RuntimeError(
+                f"{linked} also carries trace-pc-guard, which current libFuzzer "
+                "rejects at startup"
+            )
+        counted = counted or any(
+            "sanitizer_cov_8bit_counters_init" in name for name in undefined
         )
-    if any("sanitizer_cov_trace_pc_guard" in name for name in undefined):
+    if not counted:
         raise RuntimeError(
-            f"{library} also carries trace-pc-guard, which current libFuzzer "
-            "rejects at startup"
+            f"inline 8-bit counters not present in {library} or the peers it "
+            "links; the build recipe must honour CC/CXX for the fuzz sibling "
+            "to be instrumented"
         )
     return True
 
