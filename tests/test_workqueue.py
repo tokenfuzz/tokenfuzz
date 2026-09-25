@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -2109,6 +2110,95 @@ class WorkQueueTests(unittest.TestCase):
             if row.get("source") == "accepted-artifact"
         ]
         self.assertEqual([row["agent"] for row in credited], ["1"])
+
+    def add_shared_id_hypotheses(self, status: str = "PENDING") -> None:
+        """Two agents' rows with one id, as a ledger from before add-hyp refused that."""
+        for agent in ("1", "2"):
+            workqueue.append_jsonl(self.results / "state" / "hypotheses.jsonl", {
+                "id": "H-1", "agent": agent, "card_id": "WORK-A", "status": status,
+                "hypothesis": "issue in app_parse", "file": "src/app.c:app_parse:10",
+                "strategy": "S7", "created_at": "2026-01-01T00:00:00Z",
+            })
+
+    def test_a_shared_hypothesis_id_is_attributed_only_through_bundle_provenance(self) -> None:
+        # Both agents hold H-1 with a bare FIND-001. The evidence header
+        # names H-1, which cannot say whose it is.
+        self.write_cards([self.card("WORK-A", "src/a.c")])
+        self.add_shared_id_hypotheses("FIND-001")
+        bundle = self._bundle_probed_under("FIND-001-table-read", "H-1")
+        self.assertEqual(workqueue.record_artifact_rejection(
+            self.results, bundle.name, "scope", artifact_dir=bundle,
+        ), [])
+        self.assertFalse(workqueue.record_accepted_artifact_card(
+            self.results, bundle.name, "find", artifact_dir=bundle,
+        ))
+        # A run of H-1 over the bundle's testcase names the agent that filed it.
+        digest = hashlib.sha1((bundle / "testcase.py").read_bytes()).hexdigest()
+        self.add_run(agent="2", hypothesis_id="H-1", testcase_sha1=digest)
+        changed = workqueue.record_artifact_rejection(
+            self.results, bundle.name, "scope", artifact_dir=bundle,
+        )
+        self.assertEqual([(r["agent"], r["id"]) for r in changed], [("2", "H-1")])
+
+    def test_reconcile_closes_only_the_attributed_agents_row(self) -> None:
+        self.write_cards([self.card("WORK-A", "src/a.c")])
+        self.add_shared_id_hypotheses()
+        ambiguous = self._bundle_probed_under("FIND-002-slug", "H-1")
+        self.assertEqual(workqueue.reconcile_artifact_hypotheses(self.results, ambiguous), [])
+        filed = self._bundle_probed_under("CRASH-003-2", "H-1")
+        self.assertEqual(workqueue.reconcile_artifact_hypotheses(self.results, filed), ["H-1"])
+        latest = {
+            (row["agent"], row["id"]): row["status"]
+            for row in workqueue.read_jsonl(self.results / "state/hypotheses.jsonl")
+        }
+        self.assertEqual(latest, {("1", "H-1"): "PENDING", ("2", "H-1"): "CRASH-003-2"})
+
+    def test_a_closed_row_with_the_same_id_does_not_block_reconcile(self) -> None:
+        self.write_cards([self.card("WORK-A", "src/a.c")])
+        self.add_shared_id_hypotheses()
+        workqueue.append_jsonl(self.results / "state" / "hypotheses.jsonl", {
+            "id": "H-1", "agent": "2", "card_id": "WORK-A", "status": "DISCARDED",
+        })
+        bundle = self._bundle_probed_under("FIND-006-slug", "H-1")
+        self.assertEqual(workqueue.reconcile_artifact_hypotheses(self.results, bundle), ["H-1"])
+        latest = {
+            (row["agent"], row["id"]): row["status"]
+            for row in workqueue.read_jsonl(self.results / "state/hypotheses.jsonl")
+        }
+        self.assertEqual(latest, {("1", "H-1"): "FIND-006-slug", ("2", "H-1"): "DISCARDED"})
+
+    def test_update_hyp_does_not_take_a_bundle_another_agent_named(self) -> None:
+        self.add_hypothesis(hyp_id="H-1", card_id="WORK-A")
+        self.add_hypothesis(hyp_id="H-9", agent="3", card_id="WORK-A")
+        (self.results / "findings" / "FIND-002-heap-thing").mkdir(parents=True)
+        workqueue.update_hypothesis(self.ctx, "H-1", "FIND-002-heap-thing", agent="1")
+        with self.assertRaisesRegex(workqueue.HypothesisStateError, "candidates: FIND-002-heap-thing"):
+            workqueue.update_hypothesis(self.ctx, "H-9", "FIND-002", agent="3")
+
+    def test_update_hyp_resolves_a_bare_finding_id_to_its_one_bundle(self) -> None:
+        self.add_hypothesis(hyp_id="H-1", card_id="WORK-A")
+        self.add_hypothesis(hyp_id="H-2", card_id="WORK-A")
+        (self.results / "findings" / "FIND-003-sampleproj").mkdir(parents=True)
+        row = workqueue.update_hypothesis(self.ctx, "H-1", "FIND-003", agent="1")
+        self.assertEqual(row["status"], "FIND-003-sampleproj")
+
+        for name in ("FIND-004-alpha", "FIND-004-beta"):
+            bundle = self.results / "findings" / name
+            bundle.mkdir(parents=True)
+            (bundle / "input.bin").write_bytes(name.encode())
+        with self.assertRaisesRegex(
+            workqueue.HypothesisStateError, "candidates: FIND-004-alpha, FIND-004-beta",
+        ):
+            workqueue.update_hypothesis(self.ctx, "H-2", "FIND-004", agent="1")
+        (self.results / "findings" / "FIND-004-beta" / "input.bin").write_bytes(
+            b"# HYPOTHESIS-ID: H-2\n",
+        )
+        self.add_run(
+            hypothesis_id="H-2",
+            testcase_sha1=hashlib.sha1(b"# HYPOTHESIS-ID: H-2\n").hexdigest(),
+        )
+        row = workqueue.update_hypothesis(self.ctx, "H-2", "FIND-004", agent="1")
+        self.assertEqual(row["status"], "FIND-004-beta")
 
     def test_bare_status_without_evidence_is_not_applied_across_agents(self) -> None:
         self.write_cards([self.card("WORK-A", "src/a.c")])

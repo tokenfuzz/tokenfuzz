@@ -3896,30 +3896,100 @@ def status_names_artifact(status: str, artifact_name: str) -> bool:
     return bool(_status_match(status, artifact_name))
 
 
-def _artifact_owner_agents(rows: Iterable[dict], artifact_dir: Path | None) -> set[str]:
-    """Agents whose hypotheses the bundle's evidence headers were probed under."""
-    named = set(hypotheses_named_in_evidence(artifact_dir)) if artifact_dir else set()
-    return {
-        str(row.get("agent", "")) for row in rows
-        if str(row.get("id", "")).strip() in named
+_PROBE_CRASH_NAME_RE = re.compile(r"^CRASH-\d+-(\d+)(?:\..*)?$")
+
+
+def _bundle_file_digests(artifact_dir: Path) -> set[str]:
+    digests: set[str] = set()
+    for scan in (artifact_dir, artifact_dir / ".audit"):
+        try:
+            entries = [p for p in scan.iterdir() if p.is_file()]
+        except OSError:
+            continue
+        for entry in entries:
+            try:
+                digests.add(hashlib.sha1(entry.read_bytes()).hexdigest())
+            except OSError:
+                continue
+    return digests
+
+
+def artifact_owner_agent(
+    results_dir: Path | None, artifact_dir: Path | None, named: Collection[str],
+) -> str:
+    """The one agent the bundle's own provenance proves filed it, or "".
+
+    Hypothesis ids are per agent, so two agents can both hold `H-1`; the id
+    in an evidence header alone cannot say whose it is. bin/probe names a
+    bundle `CRASH-<n>-<agent>`, and a run row recording the same hypothesis
+    over a file the bundle carries names the agent that probed it.
+    """
+    if artifact_dir is None:
+        return ""
+    match = _PROBE_CRASH_NAME_RE.match(artifact_dir.name.upper())
+    if match:
+        return match.group(1)
+    if not named or results_dir is None:
+        return ""
+    digests = _bundle_file_digests(artifact_dir)
+    agents = {
+        str(run.get("agent", ""))
+        for run in read_jsonl(state_dir(results_dir) / "runs.jsonl")
+        if str(run.get("hypothesis_id", "")).strip() in named
+        and str(run.get("testcase_sha1", "")).lower() in digests
     }
+    return agents.pop() if len(agents) == 1 else ""
+
+
+def _evidence_agents(
+    rows: Iterable[dict], artifact_dir: Path | None, results_dir: Path | None,
+) -> tuple[set[str], bool]:
+    """(agents the bundle's evidence attributes, whether that is ambiguous).
+
+    A proven owner wins. Otherwise the agents holding a hypothesis the
+    evidence header names; more than one of them cannot be told apart, so
+    the caller must leave their rows alone.
+    """
+    named = set(hypotheses_named_in_evidence(artifact_dir)) if artifact_dir else set()
+    owner = artifact_owner_agent(results_dir, artifact_dir, named)
+    if owner:
+        return {owner}, False
+    # A row closed on something else cannot be this bundle's; only an open
+    # row or one already carrying an artifact status competes for it. Rows
+    # may be the full history, so judge each (agent, id) by its latest row.
+    latest = {
+        (str(row.get("agent", "")), str(row.get("id", "")).strip()): row
+        for row in rows
+    }
+    agents = {
+        str(row.get("agent", "")) for row in latest.values()
+        if str(row.get("id", "")).strip() in named
+        and (
+            is_active_hypothesis_status(str(row.get("status", "")))
+            or _ARTIFACT_STATUS_RE.match(str(row.get("status", "")).strip())
+        )
+    }
+    return (agents, False) if len(agents) <= 1 else (set(), True)
 
 
 def _rows_naming_artifact(
     rows: list[dict], how_named, artifact_dir: Path | None,
+    results_dir: Path | None = None,
 ) -> list[dict]:
     """The rows ``how_named(row)`` says name this artifact ("full" or "bare").
 
     A bare `FIND-001` names every agent's `FIND-001-<slug>`, so triage
     folding or rejecting one agent's bundle rewrote another agent's own
-    finding. A bare id therefore counts only for the agents the bundle's
-    evidence headers name; when they name none, only while a single agent
-    holds that bare id.
+    finding. A bare id therefore counts only for the agent the bundle's
+    provenance attributes; when nothing attributes one, only while a single
+    agent holds that bare id, and never when the evidence is ambiguous.
     """
     matched = [(row, how_named(row)) for row in rows]
     bare = [row for row, how in matched if how == "bare"]
-    owners = _artifact_owner_agents(rows, artifact_dir)
-    if owners:
+    owners, ambiguous = _evidence_agents(rows, artifact_dir, results_dir)
+    if ambiguous:
+        bare = []
+    elif owners:
         bare = [row for row in bare if str(row.get("agent", "")) in owners]
     elif len({str(row.get("agent", "")) for row in bare}) > 1:
         bare = []
@@ -3957,7 +4027,7 @@ def record_artifact_rejection(
         for row in _rows_naming_artifact(
             [rows[index] for index in latest_indexes.values()],
             lambda row: _status_match(str(row.get("status", "")), artifact_name),
-            artifact_dir,
+            artifact_dir, results_dir,
         ):
             previous = str(row.get("status", "")).strip()
             row["status"] = "DISCARDED"
@@ -4004,15 +4074,18 @@ def record_artifact_duplicate(
             id(row) for row in _rows_naming_artifact(
                 latest,
                 lambda row: _status_match(str(row.get("status", "")), artifact_name),
-                artifact_dir,
+                artifact_dir, results_dir,
             )
         }
+        owners, ambiguous = _evidence_agents(latest, artifact_dir, results_dir)
         changed: list[dict] = []
         for row in latest:
             previous = str(row.get("status", "")).strip()
             filed_it = id(row) in filed
             still_open = (
                 str(row.get("id", "")).strip() in named
+                and not ambiguous
+                and (not owners or str(row.get("agent", "")) in owners)
                 and is_active_hypothesis_status(previous)
             )
             if not (filed_it or still_open):
@@ -4059,7 +4132,7 @@ def record_artifact_reconsideration(
         for row in _rows_naming_artifact(
             [rows[index] for index in latest_indexes.values()],
             lambda row: _status_match(rejected_status(row), artifact_name),
-            artifact_dir,
+            artifact_dir, results_dir,
         ):
             previous = rejected_status(row)
             row["status"] = previous
@@ -5279,40 +5352,73 @@ _ARTIFACT_STATUS_RE = re.compile(r"^(CRASH|FIND)-\S+", re.I)
 def _resolve_artifact_status(ctx: Context, status: str, agent: str, hid: str) -> str:
     """Rewrite a CRASH-*/FIND-* status to the bundle directory it names.
 
-    Bundles are filed as `CRASH-NNN-<agent>`, so a bare `CRASH-NNN` names no
-    bundle; artifact-to-origin joins then miss it, or prefix-match another
-    agent's bundle with the same number. Accept the exact directory name or
-    this agent's `-<agent>` form, wherever triage has moved the bundle.
+    Bundles are filed as `CRASH-NNN-<agent>` and `FIND-NNN-<slug>`, so a bare
+    id names no bundle; artifact-to-origin joins then miss it, or
+    prefix-match another agent's bundle with the same number. Accept the
+    exact directory name or this agent's `-<agent>` form, wherever triage
+    has moved the bundle. Otherwise a bare id resolves to the one bundle
+    with that number whose provenance is this agent's, or, when none is,
+    to the only one no provenance assigns to another agent.
     """
     match = _ARTIFACT_STATUS_RE.match(str(status).strip())
     if not match:
         return status
     token = match.group(0)
+    suffix = str(status).strip()[len(token):]
     kind = "crashes" if match.group(1).upper() == "CRASH" else "findings"
 
-    def bundle_names(kind: str) -> set[str]:
+    def bundles(kind: str) -> dict[str, Path]:
         roots = (
             ctx.results_dir / kind,
             ctx.results_dir / kind / ".duplicates",
             ctx.results_dir / f"{kind}-rejected",
         )
-        return {path.name for root in roots if root.is_dir() for path in root.iterdir() if path.is_dir()}
+        return {
+            path.name: path
+            for root in roots if root.is_dir() for path in root.iterdir() if path.is_dir()
+        }
 
-    names = bundle_names(kind)
-    by_upper = {name.upper(): name for name in names}
+    same_kind = bundles(kind)
+    by_upper = {name.upper(): name for name in same_kind}
     for wanted in (token, f"{token}-{agent}"):
         if wanted.upper() in by_upper:
-            return by_upper[wanted.upper()] + str(status).strip()[len(token):]
+            return by_upper[wanted.upper()] + suffix
+    number = token.split("-", 1)[1].upper()
+
+    def carries(name: str) -> bool:
+        return bool(re.match(rf"{re.escape(number)}(?:$|[-.])", name.split("-", 1)[-1].upper()))
+
+    carriers = sorted(name for name in same_kind if carries(name))
+    owners = {
+        name: artifact_owner_agent(
+            ctx.results_dir, same_kind[name],
+            hypotheses_named_in_evidence(same_kind[name]),
+        )
+        for name in carriers
+    }
+    own = [name for name in carriers if owners[name] == str(agent)]
+    # A bundle another agent's row already names is that agent's, even when
+    # its files carry no run provenance.
+    claimed = {
+        str(row.get("status", "")).strip().upper()
+        for row in read_jsonl(state_dir(ctx.results_dir) / "hypotheses.jsonl")
+        if str(row.get("agent", "")) != str(agent)
+    }
+    unowned = [
+        name for name in carriers
+        if not owners[name] and name.upper() not in claimed
+    ]
+    if len(own) == 1:
+        return own[0] + suffix
+    if not own and len(unowned) == 1:
+        return unowned[0] + suffix
     # Triage routes a finding with a saved reproducer to crashes/ under
     # CRASH-<rest>, so list either kind's bundle carrying this number.
-    number = token.split("-", 1)[1].upper()
-    candidates = sorted(
-        name for name in names | bundle_names("findings" if kind == "crashes" else "crashes")
-        if re.match(rf"{re.escape(number)}(?:$|[-.])", name.split("-", 1)[-1].upper())
-    )
+    other_kind = bundles("findings" if kind == "crashes" else "crashes")
+    candidates = sorted(carriers + [name for name in other_kind if carries(name)])
     raise HypothesisStateError(
         f"update-hyp refuses {token} for {hid}: no {kind}/ bundle is named "
-        f"{token} or {token}-{agent}"
+        f"{token} or {token}-{agent}, and the bare id does not pick out one bundle"
         + (f"; candidates: {', '.join(candidates)}" if candidates else "")
         + ". Use the exact bundle directory name."
     )
@@ -5452,9 +5558,15 @@ def reconcile_artifact_hypotheses(results_dir: Path, artifact_dir: Path) -> list
     path = state_dir(results_dir) / "hypotheses.jsonl"
 
     def open_rows(rows: list[dict]) -> list[dict]:
+        # Another agent can hold the same hypothesis id; close only the rows
+        # the bundle's provenance attributes, and none when it cannot tell.
+        owners, ambiguous = _evidence_agents(rows, artifact, results_dir)
+        if ambiguous:
+            return []
         return [
             row for row in rows
             if str(row.get("id", "")).strip() in named
+            and (not owners or str(row.get("agent", "")) in owners)
             and is_active_hypothesis_status(str(row.get("status", "")))
         ]
 
@@ -5510,7 +5622,9 @@ def record_accepted_artifact_card(
             return "full"
         return "bare" if artifact_upper.startswith(status + "-") else ""
 
-    matches = _rows_naming_artifact(list(latest.values()), how_named, artifact_dir)
+    matches = _rows_naming_artifact(
+        list(latest.values()), how_named, artifact_dir, results_dir,
+    )
     if not matches:
         return False
     origin = max(
