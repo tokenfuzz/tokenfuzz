@@ -410,7 +410,8 @@ class ToolchainShimCompanionTests(unittest.TestCase):
         llvm.mkdir(parents=True)
         for name in ("clang", "clang++", *tools):
             tool = llvm / name
-            tool.write_text("#!/bin/sh\n", encoding="utf-8")
+            # Each stand-in prints the arguments it was run with.
+            tool.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n', encoding="utf-8")
             tool.chmod(0o755)
         return llvm
 
@@ -422,17 +423,47 @@ class ToolchainShimCompanionTests(unittest.TestCase):
             cc, _cxx = coverage_build.toolchain_shims(root, sibling)
         return cc.parent
 
-    def test_module_scanner_beside_the_compiler_is_reachable_from_the_shims(self) -> None:
+    def test_the_scanner_is_handed_the_real_compiler_in_the_shims_place(self) -> None:
+        # The scanner derives the SDK and standard library from the compiler
+        # path it is handed; a shim script has neither.
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             llvm = self._llvm(root, "clang-scan-deps")
             for sibling in coverage_build.SIBLING_SUFFIXES:
                 directory = self._shims(root, llvm, sibling)
-                scanner = directory / "clang-scan-deps"
-                self.assertEqual(scanner.resolve(), (llvm / "clang-scan-deps").resolve())
-                # Rewritten on every build without failing on the old link.
+                # Rewritten on every build without failing on the old one.
                 self._shims(root, llvm, sibling)
-                self.assertTrue(os.access(scanner, os.X_OK))
+                argv = subprocess.run(
+                    [str(directory / "clang-scan-deps"), "-format=p1689", "--",
+                     str(directory / "cxx"), "-c", "a b.cc", "--",
+                     str(directory / "gcc"), str(root / "cxx")],
+                    capture_output=True, text=True, check=True,
+                ).stdout.splitlines()
+                self.assertEqual(argv, [
+                    "-format=p1689", "--", str(llvm / "clang++"), "-c", "a b.cc",
+                    "--", str(llvm / "clang"), str(root / "cxx"),
+                ])
+
+    def test_a_recorded_failure_retries_once_the_scanner_is_answered_for(self) -> None:
+        # A sibling that failed without the scanner must not stay remembered
+        # as unavailable after the shims learn to answer for it.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            llvm = self._llvm(root, "clang-scan-deps")
+            directory = self._shims(root, llvm, coverage_build.FUZZ_SUFFIX)
+            shims = (directory / "cc", directory / "cxx")
+            recipe = root / "build.sh"
+            recipe.write_text("true\n", encoding="utf-8")
+            with mock.patch.object(
+                coverage_build.fuzz_harness, "fuzzing_compiler",
+                side_effect=lambda cxx=False: str(llvm / ("clang++" if cxx else "clang")),
+            ), mock.patch.object(
+                coverage_build.target_config, "source_signature", return_value="src",
+            ):
+                linked = coverage_build._identity(root, recipe, shims)
+                (directory / "clang-scan-deps").unlink()
+                unlinked = coverage_build._identity(root, recipe, shims)
+            self.assertNotEqual(linked, unlinked)
 
     def test_no_scanner_beside_the_compiler_adds_no_link(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

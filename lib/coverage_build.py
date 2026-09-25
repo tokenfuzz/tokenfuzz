@@ -72,8 +72,8 @@ _MASQUERADE_NAMES = (
 )
 
 
-#: Tools a build system locates beside the compiler rather than on PATH.
-_COMPILER_COMPANIONS = ("clang-scan-deps",)
+#: The C++20 module scanner, which CMake locates beside the compiler.
+_SCANNER = "clang-scan-deps"
 
 
 def tree_name(san: str = "asan", sibling: str = COVERAGE_SUFFIX, *,
@@ -151,12 +151,14 @@ def toolchain_shims(root: Path, sibling: str = COVERAGE_SUFFIX) -> "tuple[Path, 
     directory = Path(root) / ".audit" / spec.shim_dir
     directory.mkdir(parents=True, exist_ok=True)
     shims = []
+    reals = []
     for name, real in (
         ("cc", fuzz_harness.fuzzing_compiler()),
         ("cxx", fuzz_harness.fuzzing_compiler(cxx=True)),
     ):
         if not shutil.which(real):
             raise OSError(f"compiler not found: {real}")
+        reals.append(shutil.which(real))
         path = directory / name
         text = (
             "#!/bin/sh\nexec " + shlex.join([real, *spec.flags])
@@ -167,18 +169,7 @@ def toolchain_shims(root: Path, sibling: str = COVERAGE_SUFFIX) -> "tuple[Path, 
         temporary.chmod(0o755)
         os.replace(temporary, path)
         shims.append(path)
-    # CMake finds a C++20 module scanner beside the compiler it was handed and
-    # records NOTFOUND otherwise, failing every scan step of a C++20 project
-    # that the primary, built with the real compiler, compiled. Link the one
-    # that ships beside the real compiler so the shim directory answers too.
-    for tool in _COMPILER_COMPANIONS:
-        real = Path(shutil.which(fuzz_harness.fuzzing_compiler(cxx=True))).parent / tool
-        if real.is_file():
-            link = directory / tool
-            temporary = link.with_name(f".{tool}.{os.getpid()}.tmp")
-            temporary.unlink(missing_ok=True)
-            temporary.symlink_to(real)
-            os.replace(temporary, link)
+    _write_scanner(directory, *reals)
     # Same content under every name a build might reach for, so a recipe that
     # ignores CC/CXX still compiles through the instrumentation when this
     # directory leads PATH.
@@ -191,6 +182,40 @@ def toolchain_shims(root: Path, sibling: str = COVERAGE_SUFFIX) -> "tuple[Path, 
             temporary.chmod(0o755)
             os.replace(temporary, alias)
     return shims[0], shims[1]
+
+
+def _write_scanner(directory: Path, real_cc: str, real_cxx: str) -> None:
+    """Answer for the module scanner CMake seeks beside the shim compiler.
+
+    CMake records NOTFOUND without one, failing every scan step of a C++20
+    project the primary compiled. The scanner does not run the compiler it is
+    handed; it derives the driver's configuration (SDK, standard library)
+    from that path, which a shim script lacks. So the wrapper hands it the
+    real compiler in the shim's place. Instrumentation flags change no
+    dependency, so they are not repeated.
+    """
+    scanner = Path(real_cxx).parent / _SCANNER
+    path = directory / _SCANNER
+    if not scanner.is_file():
+        path.unlink(missing_ok=True)
+        return
+    arms = []
+    for shim, names, real in zip(("cc", "cxx"), _MASQUERADE_NAMES, (real_cc, real_cxx)):
+        spellings = dict.fromkeys((shim, *names))
+        pattern = "|".join(shlex.quote(str(directory / name)) for name in spellings)
+        arms.append(f"    {pattern}) set -- \"$@\" {shlex.quote(real)} ;;\n")
+    text = (
+        "#!/bin/sh\n"
+        "for arg; do\n  shift\n  case \"$arg\" in\n"
+        + "".join(arms)
+        + "    *) set -- \"$@\" \"$arg\" ;;\n  esac\ndone\n"
+        + f"exec {shlex.quote(str(scanner))} \"$@\"\n"
+    )
+    temporary = path.with_name(f".{_SCANNER}.{os.getpid()}.tmp")
+    temporary.unlink(missing_ok=True)
+    temporary.write_text(text, encoding="utf-8")
+    temporary.chmod(0o755)
+    os.replace(temporary, path)
 
 
 def verify_tree(config, san: str, tree: Path) -> bool:
@@ -314,6 +339,13 @@ def _identity(root: Path, recipe: Path, shims: "tuple[Path, Path]") -> str:
         except OSError:
             digest.update(b"<missing>")
         digest.update(b"\0")
+    # The scanner wrapper can turn a failed build into a working one, so it
+    # is part of what a failure is bound to.
+    try:
+        digest.update((shims[0].parent / _SCANNER).read_bytes())
+    except OSError:
+        digest.update(b"<none>")
+    digest.update(b"\0")
     for real in (fuzz_harness.fuzzing_compiler(), fuzz_harness.fuzzing_compiler(cxx=True)):
         try:
             stat = os.stat(shutil.which(real) or real)
