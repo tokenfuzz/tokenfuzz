@@ -100,6 +100,9 @@ _C_LEXEME_RE = re.compile(
     r"(?P<comment>//[^\n]*|/\*.*?(?:\*/|\Z))",
     re.S,
 )
+_C_ENTRY_POINT_RE = re.compile(
+    r"\b(?:main|LLVMFuzzerTestOneInput)\s*\([^;{}]*\)\s*(?:noexcept\s*)?\{"
+)
 _LOADER_STRING_RE = re.compile(
     r'^"(?:DYLD_INSERT_LIBRARIES|LD_PRELOAD)(?:=[^"]*)?"$'
 )
@@ -434,22 +437,39 @@ def configured_api_include(
 ) -> str:
     """Return the first `#include` only a configured harness include dir provides.
 
-    A C/C++ source that includes the target's own public headers is an API
-    driver that must be compiled. A source-parsing target's input (a compiler
+    A C/C++ source that defines `main` (or a fuzz entry point) and includes
+    the target's own public headers is an API driver that must be compiled. A source-parsing target's input (a compiler
     or preprocessor testcase) includes standard headers, which such a target
     may also ship under its include dirs; the system search list resolves
     those too, so they keep the testcase reaching the configured binary.
     """
     roots = [Path(config.resolve_path(value)) for value in config.includes]
+    raw = _C_LINE_SPLICE_RE.sub("", source.read_text(encoding="utf-8", errors="replace"))
+
+    def blank(value: str) -> str:
+        return "".join("\n" if char == "\n" else " " for char in value)
+
+    # A raw string or comment can hold a whole `#include` line, so only
+    # directives outside them count. An ordinary string cannot span a line,
+    # and a quoted include is one, so it stays for the include scan.
     text = _C_LEXEME_RE.sub(
-        lambda match: " " if match.group("comment") else match.group(0),
-        source.read_text(encoding="utf-8", errors="replace"),
+        lambda match: match.group(0) if match.group("string") else blank(match.group(0)),
+        raw,
     )
+    # A source-parsing target's input may include the target's own header;
+    # only a translation unit that defines an entry point is a driver.
+    code = _C_LEXEME_RE.sub(lambda match: blank(match.group(0)), raw)
+    if not _C_ENTRY_POINT_RE.search(code):
+        return ""
     for name in _C_INCLUDE_RE.findall(text):
-        if (
-            any((root / name).is_file() for root in roots)
-            and not any((root / name).is_file() for root in system_dirs())
-        ):
+        if not any((root / name).is_file() for root in roots):
+            continue
+        searched = system_dirs()
+        # Without the compiler's search list, the target's own copy of a
+        # standard header would read as target-only: refuse nothing.
+        if not searched:
+            return ""
+        if not any((root / name).is_file() for root in searched):
             return name
     return ""
 

@@ -170,7 +170,9 @@ class ProbeCppHarnessTests(unittest.TestCase):
         self.assertFalse([name for name in cache_entries if name.endswith(".dSYM")], cache_entries)
         self.assertTrue([name for name in cache_entries if name.endswith(".link0.o")], cache_entries)
 
-    def _source_testcase(self, name: str, include: str) -> Path:
+    def _source_testcase(
+        self, name: str, include: str, body: str = "int main(void) { return 0; }\n",
+    ) -> Path:
         (self.target / "include" / "sampleproj").mkdir(parents=True)
         (self.target / "include" / "sampleproj" / "api.h").write_text("int app_parse(void);\n")
         # A source-parsing target may ship its own standard headers.
@@ -185,9 +187,47 @@ class ProbeCppHarnessTests(unittest.TestCase):
         path.write_text(
             "// TARGET: native/api.cpp:app_parse:1\n// HYPOTHESIS-ID: H-src\n"
             f"// CATEGORY: bounds\n#include {include}\n#include <stdio.h>\n"
-            "int main(void) { return 0; }\n"
+            + body
         )
         return path
+
+    def assert_reaches_binary(self, testcase: Path, **env) -> None:
+        process = self.run_probe(testcase, **env)
+        self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
+        self.assertRegex(process.stdout, rf"command: \S+ asan generic \S+/{re.escape(testcase.name)}\n")
+
+    def test_an_include_inside_a_raw_string_is_not_a_driver(self) -> None:
+        testcase = self._source_testcase(
+            "input.cpp", "<stddef.h>",
+            'const char *text = R"x(\n#include <sampleproj/api.h>\n)x";\n'
+            "int main(void) { return text[0]; }\n",
+        )
+        self.assert_reaches_binary(testcase)
+
+    def test_a_source_input_with_the_target_header_but_no_main_is_input(self) -> None:
+        testcase = self._source_testcase(
+            "input.c", "<sampleproj/api.h>",
+            'int use(void) { return app_parse(); }\nconst char *s = "main() {";\n',
+        )
+        self.assert_reaches_binary(testcase)
+
+    def test_failed_system_include_discovery_refuses_nothing(self) -> None:
+        # The target's copy of <stddef.h> reads as target-only when the
+        # compiler cannot list its own search path.
+        testcase = self._source_testcase("input.c", "<stddef.h>")
+        broken = self.executable("broken-cc", "raise SystemExit(1)\n")
+        self.assert_reaches_binary(testcase, CC=broken)
+
+    def test_a_fuzz_entry_point_with_a_target_header_is_refused(self) -> None:
+        testcase = self._source_testcase(
+            "driver.c", "<sampleproj/api.h>",
+            "int LLVMFuzzerTestOneInput(const unsigned char *d, unsigned long n)\n{ return app_parse(); }\n",
+        )
+        process = subprocess.run(
+            [str(PROBE), str(testcase)], capture_output=True, text=True, env=self.env,
+        )
+        self.assertEqual(process.returncode, 2, process.stdout + process.stderr)
+        self.assertIn("<sampleproj/api.h>", process.stderr)
 
     def test_api_driver_without_harness_header_is_refused_not_fed_as_input(self) -> None:
         """A driver fed to the target binary as input never runs.
