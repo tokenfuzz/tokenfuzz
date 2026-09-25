@@ -1871,6 +1871,34 @@ class WorkQueueTests(unittest.TestCase):
         self.assertNotIn("invalid status", result.stderr)
         self.assertIn("refuses discarded for WORK-A", result.stderr)
 
+    def test_state_cli_add_run_refuses_a_row_without_its_evidence(self) -> None:
+        scratch = self.results / "scratch-1"
+        scratch.mkdir(parents=True, exist_ok=True)
+        testcase = scratch / "case.bin"
+        testcase.write_bytes(b"abc")
+
+        def add_run(output: str, cwd: Path) -> subprocess.CompletedProcess:
+            return subprocess.run([
+                sys.executable, str(ROOT / "bin" / "state"),
+                "--target-path", str(self.target), "--target-slug", "sample",
+                "--results-dir", str(self.results),
+                "add-run", "--agent", "1", "--hypothesis-id", "H-1", "--mode", "generic",
+                "--testcase", "scratch-1/case.bin", "--asan-output", output, "--verdict", "CLEAN",
+            ], capture_output=True, text=True, cwd=cwd)
+
+        refused = add_run("scratch-1/case.asan.txt", self.results)
+        self.assertEqual(refused.returncode, 2, refused.stderr)
+        self.assertIn("case.asan.txt does not exist", refused.stderr)
+        self.assertIn("bin/probe", refused.stderr)
+        self.assertEqual(workqueue.read_jsonl(self.results / "state" / "runs.jsonl"), [])
+
+        (scratch / "case.asan.txt").write_text("clean\n")
+        accepted = add_run("scratch-1/case.asan.txt", self.results)
+        self.assertEqual(accepted.returncode, 0, accepted.stderr)
+        [row] = workqueue.read_jsonl(self.results / "state" / "runs.jsonl")
+        self.assertEqual(row["asan_output"], str((scratch / "case.asan.txt").resolve()))
+        self.assertEqual(row["testcase_sha1"], "a9993e364706816aba3e25717850c26c9cd0d89d")
+
     def test_state_cli_records_card_status_only_with_an_agent(self) -> None:
         """An agentless row joins no lease, crash gate, or conclusion count."""
         self.write_cards([self.card("WORK-A", "src/app.c")])

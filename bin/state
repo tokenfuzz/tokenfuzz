@@ -8,6 +8,7 @@ the machine-readable source for work-card claims, hypotheses, and ASan runs.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -630,6 +631,26 @@ def main(argv: list[str]) -> int:
         _emit_mutator("update-card", row, args.json)
         return 0
     if args.cmd == "add-run":
+        # bin/probe writes its rows through workqueue.add_run directly (a
+        # NO_EXEC there may have no output file). A hand-written row is
+        # evidence only when the files it names exist; rows naming neither
+        # inflated run metrics.
+        missing = [
+            f"--{flag.replace('_', '-')} {getattr(args, flag)}"
+            for flag in ("testcase", "asan_output")
+            if not Path(getattr(args, flag)).is_file()
+        ]
+        if missing:
+            print(
+                f"[state] add-run refuses a row without its evidence: {', '.join(missing)} "
+                "does not exist. Run the testcase through bin/probe; it records the run for you.",
+                file=sys.stderr,
+            )
+            return 2
+        args.testcase = str(Path(args.testcase).resolve())
+        args.asan_output = str(Path(args.asan_output).resolve())
+        if not args.testcase_sha1:
+            args.testcase_sha1 = hashlib.sha1(Path(args.testcase).read_bytes()).hexdigest()
         _emit_mutator("add-run", add_run(ctx, args), args.json)
         return 0
     if args.cmd == "add-note":
