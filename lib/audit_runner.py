@@ -1076,6 +1076,26 @@ def _last_line(text: str | None) -> str:
     return lines[-1] if lines else "no diagnostic"
 
 
+def _write_pinned_source_manifest(runtime: Runtime, cards: list[dict]) -> None:
+    """Give direct-card lanes the same review ledger as ranked lanes."""
+    ctx = _queue_context(runtime)
+    delta = getattr(runtime, "delta", None)
+    source_paths = []
+    for path in workqueue.iter_source_files(
+        ctx.target_root,
+        only=delta.files if delta is not None else None,
+        repo_type=ctx.repo_type,
+    ):
+        rel = workqueue.relpath(path, ctx.target_root)
+        if workqueue.is_auditable_source_path(rel):
+            source_paths.append((path, rel))
+    coverage_ledger.write_manifest(
+        ctx, source_paths,
+        {workqueue.normalized_relpath(card.get("file", "")) for card in cards},
+        scope="delta" if delta is not None else "tree",
+    )
+
+
 def refresh_work_cards(
     runtime: Runtime, *, force: bool = False, limit: int | None = None,
 ) -> bool:
@@ -1118,6 +1138,7 @@ def refresh_work_cards(
             runtime.results / "work-cards.jsonl",
             workqueue.apply_latest_claim_status(_queue_context(runtime), cards),
         )
+        _write_pinned_source_manifest(runtime, cards)
         _write_rank_window(runtime, rank_limit)
         housekeeping.mark_clean("work-cards-refresh", signature)
         return True
@@ -1208,6 +1229,7 @@ def refresh_work_cards(
             runtime.results / "work-cards.jsonl",
             workqueue.apply_latest_claim_status(ctx, s1_cards),
         )
+        _write_pinned_source_manifest(runtime, s1_cards)
     elif pinned_s6:
         s6_cards = [
             card for card in workqueue.read_jsonl(runtime.results / "s6-peer-cards.jsonl")
@@ -1220,6 +1242,7 @@ def refresh_work_cards(
             runtime.results / "work-cards.jsonl",
             workqueue.apply_latest_claim_status(_queue_context(runtime), s6_cards),
         )
+        _write_pinned_source_manifest(runtime, s6_cards)
     elif rank.is_file():
         command = [
             str(rank), "--target-path", str(runtime.target_root),
@@ -2555,6 +2578,7 @@ def enforce_orphan_testcases(runtime: Runtime, *, deadline: float | None = None)
     # unexecuted testcases were never probed and their next session never saw
     # the enforcement feedback that names them.
     queues: list[tuple[int, list[str]]] = []
+    unattributed = 0
     for agent in range(1, runtime.num_agents + 1):
         _runs, _testcases, orphans = quality.scan_scratch(
             str(runtime.results / f"scratch-{agent}")
@@ -2563,10 +2587,22 @@ def enforce_orphan_testcases(runtime: Runtime, *, deadline: float | None = None)
         for testcase in orphans:
             try:
                 if Path(testcase).stat().st_size:
-                    runnable.append(testcase)
+                    if quality.hypothesis_id_in_header(testcase):
+                        runnable.append(testcase)
+                    else:
+                        # An opaque input needs an explicit hypothesis ID;
+                        # bin/probe cannot infer one from a generated file.
+                        _append(
+                            runtime.results / f".enforcement_results_{agent}",
+                            f"- SKIPPED `{Path(testcase).name}` — no HYPOTHESIS-ID header; "
+                            "run opaque inputs with bin/probe --hypothesis-id",
+                        )
+                        unattributed += 1
             except OSError:
                 continue
         queues.append((agent, runnable))
+    if unattributed:
+        index_log(runtime, f"orphan enforcement: skipped {unattributed} files without hypothesis IDs")
     for index in range(max((len(runnable) for _agent, runnable in queues), default=0)):
         for agent, runnable in queues:
             if index >= len(runnable):

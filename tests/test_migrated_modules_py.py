@@ -2141,6 +2141,10 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         "a pinned S4 refresh creates only its unranked campaign card",
         f"cards={s4_cards!r} window={s4_window!r}",
     )
+    check(
+        audit_runner.coverage_ledger.manifest_path(refresh_results).is_file(),
+        "a pinned S4 refresh creates a source manifest for review receipts",
+    )
     with mock.patch.object(audit_runner.housekeeping, "should_run", return_value=True), \
          mock.patch.object(audit_runner.housekeeping, "mark_clean"), \
          mock.patch.object(audit_runner.workqueue, "campaign_supported", return_value=False), \
@@ -2223,6 +2227,12 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         and audit_runner._rank_window(refresh_runtime) == (4, 4),
         "a pinned S1 refresh uses the full expandable window and skips unrelated ranking",
         f"tools={pinned_tools!r} cards={pinned_cards!r}",
+    )
+    check(
+        audit_runner.coverage_ledger.manifest_row(
+            refresh_results, "src/unit00.c",
+        ) is not None,
+        "a pinned S1 patch card can record reviewed source ranges",
     )
     refresh_runtime.fixed_strategy = "S6"
     audit_runner.workqueue.write_cards(
@@ -2813,6 +2823,9 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
     )
     orphan = launch_scratch / "orphan.html"
     orphan.write_text("<!-- TARGET: src/parser.c -->\n<!-- HYPOTHESIS-ID: H78 -->\n<html/>\n")
+    # A testcase may create an input-shaped database as a side effect. With no
+    # hypothesis header, housekeeping cannot infer what to pass to bin/probe.
+    (launch_scratch / "generated.db").write_bytes(b"database output\n")
     def _enforce_probe(command, _seconds, **_kwargs):
         Path(command[-1]).with_suffix(".asan.txt").write_text(
             "[run-sanitizer-multi] SUCCESS_RATE: 1/1\n", encoding="utf-8"
@@ -2822,6 +2835,8 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         enforced = audit_runner.enforce_orphan_testcases(launch_runtime)
     check(
         enforced == 1 and "CLEAN `orphan.html`" in
+        (launch_results / ".enforcement_results_1").read_text(encoding="utf-8")
+        and "SKIPPED `generated.db`" in
         (launch_results / ".enforcement_results_1").read_text(encoding="utf-8"),
         "post-iteration housekeeping probes runnable orphan testcases once",
     )
