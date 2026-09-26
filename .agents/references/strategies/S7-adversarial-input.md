@@ -97,9 +97,6 @@ For a library-only Cargo package, a direct `.rs` testcase is the configured
 runner route: `bin/probe` links it to the audited crate. Use that route under
 S7; it is not an S4 fuzz harness.
 
-If a managed testcase prerequisite is absent, print `NO_EXEC: <proof>` and
-exit 2; do not raise an exception.
-
 **Direct-input gate:** the trigger must occur during one documented parse or
 decode operation on the crafted input. Do not add a dump, encode, round trip,
 or other trusted follow-up operation merely to make an output-only surface

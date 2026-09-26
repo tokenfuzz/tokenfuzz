@@ -862,8 +862,7 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
     check(
         "**Strategy:** S7" in companion_directive
         and "**Card primary strategy:** S2" in companion_directive
-        and "minimal deterministic public-API harness" in companion_directive
-        and "NO_EXEC: <proof>" in companion_directive,
+        and "minimal deterministic public-API harness" in companion_directive,
         "initial prompts label and instruct the assigned S7 companion strategy",
         companion_directive,
     )

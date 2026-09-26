@@ -186,6 +186,9 @@ ok("Do not embed absolute audit scratch paths in testcase source" in common,
    "common suffix keeps sidecar reproducers portable")
 ok("trace a concrete product ingress that converts untrusted bytes" in common,
    "common suffix distinguishes direct API parameters from byte ingress")
+ok("NO_EXEC: <proof" in common and "do not exit 0 or raise" in common
+   and "exits with the child's nonzero status" in common,
+   "common suffix routes every strategy's missing prerequisite to NO_EXEC")
 ok("do not edit its saved testcase, harness, or sanitizer output" in common
    and "run bin/probe --confirm again before exporting" in common.replace("`", ""),
    "common suffix preserves receipt-bound crash evidence")

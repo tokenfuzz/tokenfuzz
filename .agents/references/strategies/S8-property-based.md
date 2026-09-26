@@ -66,9 +66,6 @@ property counter-example.
 For managed-runtime oracles, catch only the parser or API's documented
 input-rejection exceptions. Let every other exception escape so a shared
 unexpected failure cannot be normalized into an apparently equal result.
-If a managed testcase prerequisite is absent, print `NO_EXEC: <proof>` and
-exit 2; do not raise an exception.
-
 A wrong exception type or one request's uncaught exception is robustness, and
 denial of service is not scored here in any form. File it only with proof of a
 separate memory-safety, disclosure, injection, or authorization consequence.
