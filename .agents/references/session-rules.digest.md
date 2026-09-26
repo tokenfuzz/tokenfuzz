@@ -29,6 +29,23 @@ harness's harvester only looks under `${RESULTS_DIR}`.
     Different C/C++ harness logic needs a unique sibling filename per testcase;
     put that exact name in HARNESS and never overwrite a shared harness.
   - `bin/probe "${RESULTS_DIR}/scratch-N/tc.html"` → 1 run; `--confirm` → 5 runs.
+  - A native CLI flag the hypothesis needs goes after `--`:
+    `bin/probe "${RESULTS_DIR}/scratch-N/<testcase>" -- <flag>`. Confirm with
+    the same flags; a parse-only MISS cannot discard a pass-specific hypothesis.
+  - A C/C++ harness that drives the product executable launches
+    `$TOKENFUZZ_TARGET_BIN` (probe and the exported reproducer set it), never a
+    path into the audit checkout's `build-asan/`.
+  - Testcase and sidecar source never embed absolute audit scratch paths; use
+    the language's temp-directory API or a path beside the testcase. Export
+    rejects internal paths.
+  - A missing prerequisite (device, optional module, platform): print
+    `NO_EXEC: <proof>` and exit 2, never exit 0 or raise. A harness running
+    the target as a child exits with the child's nonzero status. A zero exit
+    that never reached the target records CLEAN, which counts against the
+    hypothesis.
+  - Once `--confirm` files a crash, do not edit its saved testcase, harness,
+    or output: the receipt hashes them. Revise a scratch copy and re-confirm
+    before export.
   - Direct `.swift` and `.rs` testcases are package harnesses: `bin/probe`
     compiles them against exported libraries even when `[runner].args` only
     contains `{TESTCASE}` or the audited package has no executable product.
@@ -198,6 +215,9 @@ only what it does not say.
   reach at it (prioritisation only, not a CVSS input).
 - `Parameter control` (when value-dependent): direct / mapped /
   application-supplied / harness-only / none.
+- A library caller supplying shapes, counts, or objects is a `call-sequence`
+  trigger unless a traced product ingress converts untrusted bytes into those
+  exact parameters; never label a direct API call `bytes` for that reason.
 
 ## FIND quality bar
 

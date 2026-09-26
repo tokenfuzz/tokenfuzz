@@ -175,23 +175,30 @@ def render_named(name: str, vars_dict: dict[str, str]) -> tuple[int, str]:
     return proc.returncode, re.sub(r"[>\s]+", " ", proc.stdout)
 
 
-rc, common = render_named("common_suffix.md.j2", {"results_dir": "/r"})
-ok(rc == 0, "common_suffix renders")
-ok("bin/probe /r/scratch-N/<testcase -- <flag" in common
-   and "with a flag the target supports" in common,
-   "common suffix explains per-testcase native CLI flags")
-ok("Read TOKENFUZZ_TARGET_BIN to launch the configured sanitizer executable" in common.replace("`", ""),
-   "common suffix keeps process-driving harnesses on the rebuilt product")
-ok("Do not embed absolute audit scratch paths in testcase source" in common,
-   "common suffix keeps sidecar reproducers portable")
-ok("trace a concrete product ingress that converts untrusted bytes" in common,
-   "common suffix distinguishes direct API parameters from byte ingress")
-ok("NO_EXEC: <proof" in common and "do not exit 0 or raise" in common
-   and "exits with the child's nonzero status" in common,
-   "common suffix routes every strategy's missing prerequisite to NO_EXEC")
-ok("do not edit its saved testcase, harness, or sanitizer output" in common
-   and "run bin/probe --confirm again before exporting" in common.replace("`", ""),
-   "common suffix preserves receipt-bound crash evidence")
+# Every backend receives the session-rules digest, including those that
+# auto-load AGENTS.md and skip the full common suffix, so rules every agent
+# needs live there once.
+digest = " ".join(
+    (ROOT / ".agents" / "references" / "session-rules.digest.md")
+    .read_text(encoding="utf-8").replace("`", "").split()
+)
+for name in ("common_suffix.md.j2", "autoloaded_common_suffix.md.j2"):
+    ok("{{ session_rules_digest }}" in (ROOT / "lib" / "prompts" / name).read_text(encoding="utf-8"),
+       f"{name} embeds the session-rules digest")
+ok("scratch-N/<testcase>\" -- <flag>" in digest and "Confirm with the same flags" in digest,
+   "digest explains per-testcase native CLI flags")
+ok("launches $TOKENFUZZ_TARGET_BIN" in digest,
+   "digest keeps process-driving harnesses on the rebuilt product")
+ok("never embed absolute audit scratch paths" in digest,
+   "digest keeps sidecar reproducers portable")
+ok("unless a traced product ingress converts untrusted bytes" in digest,
+   "digest distinguishes direct API parameters from byte ingress")
+ok("NO_EXEC: <proof> and exit 2, never exit 0 or raise" in digest
+   and "exits with the child's nonzero status" in digest,
+   "digest routes every strategy's missing prerequisite to NO_EXEC")
+ok("do not edit its saved testcase, harness, or output" in digest
+   and "re-confirm before export" in digest,
+   "digest preserves receipt-bound crash evidence")
 
 
 rc, sf = render_named("safety_framing.md.j2", {"results_dir": "/r"})
