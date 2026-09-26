@@ -1646,9 +1646,10 @@ def _probeable_alternate_builds(ctx: Context) -> dict[str, str]:
 def _go_build_target(ctx: Context) -> tuple[str, str, set[str], set[str]] | None:
     """Return the probe runner's Go target and known filename suffix tags.
 
-    Asked of the configured runner under its own [runner].env, since a pinned
-    GOOS or GOARCH decides which files a probe can build; the ambient `go`
-    answers only when no Go runner is configured.
+    Asked of the tree's pinned Go runner, from the checkout and under its own
+    [runner].env, since a pinned GOOS or GOARCH decides which files a probe
+    can build. Without an established Go runner the answer is unknown and no
+    card is demoted: guessing from the ambient `go` could bury runnable work.
     """
     if ctx._go_target_cache:
         return ctx._go_target_cache[0]
@@ -1662,35 +1663,36 @@ def _go_target_from_runner(ctx: Context) -> tuple[str, str, set[str], set[str]] 
     import sanitizer_run  # lazy: see import note at top of file
     import target_config  # lazy: see import note at top of file
 
-    go, environment = "go", dict(os.environ)
-    config = None
     # This tree's own pinned session only: an upward search could adopt
     # another target's runner.
-    if (ctx.results_dir / ".session-env").is_file():
-        config = target_config.Config(
-            target_root=str(ctx.target_root), results_dir=str(ctx.results_dir),
+    if not (ctx.results_dir / ".session-env").is_file():
+        return None
+    config = target_config.Config(
+        target_root=str(ctx.target_root), results_dir=str(ctx.results_dir),
+    )
+    try:
+        target_config.load_toml_into(
+            config, target_config.target_toml_for_session_dir(ctx.results_dir),
         )
-        try:
-            target_config.load_toml_into(
-                config, target_config.target_toml_for_session_dir(ctx.results_dir),
-            )
-        except (OSError, ValueError, target_config.PinnedConfigError):
-            config = None
-    if config is not None and Path(config.runner_bin).name == "go":
-        go = str(runner_preflight.runner_path(config))
-        for entry in config.runner_env:
-            key, _, value = sanitizer_run.expand_runner_value(
-                entry, config, "race",
-            ).partition("=")
-            environment[key] = value
+    except (OSError, ValueError, target_config.PinnedConfigError):
+        return None
+    if Path(config.runner_bin).name != "go":
+        return None
+    go = str(runner_preflight.runner_path(config))
+    environment = dict(os.environ)
+    for entry in config.runner_env:
+        key, _, value = sanitizer_run.expand_runner_value(
+            entry, config, "race",
+        ).partition("=")
+        environment[key] = value
     try:
         selected = subprocess.run(
             [go, "env", "GOOS", "GOARCH"], capture_output=True, text=True,
-            timeout=5, check=False, env=environment,
+            timeout=5, check=False, env=environment, cwd=ctx.target_root,
         )
         supported = subprocess.run(
             [go, "tool", "dist", "list"], capture_output=True, text=True,
-            timeout=5, check=False, env=environment,
+            timeout=5, check=False, env=environment, cwd=ctx.target_root,
         )
     except (OSError, subprocess.TimeoutExpired):
         return None

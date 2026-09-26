@@ -1556,6 +1556,25 @@ class WorkQueueTests(unittest.TestCase):
         self.assertIsNotNone(target)
         self.assertEqual(target[:2], ("linux", "amd64"))
 
+    def test_go_platform_is_unknown_without_an_established_go_runner(self) -> None:
+        # Guessing from the ambient `go` could demote runnable cards; with no
+        # session, a tampered pin, or a non-Go runner nothing is demoted.
+        self.assertIsNone(workqueue._go_target_from_runner(self.ctx))
+        self.results.mkdir(parents=True, exist_ok=True)
+        config = self.results / ".target.toml"
+        config.write_text(
+            'target = "sample"\n[runner]\nbin = "python3"\nargs = ["{TESTCASE}"]\n',
+            encoding="utf-8",
+        )
+        (self.results / ".session-env").write_text(
+            f"RESULTS_DIR={self.results}\nTARGET_ROOT={self.target}\n"
+            f"TARGET_CONFIG_SHA256={hashlib.sha256(config.read_bytes()).hexdigest()}\n",
+            encoding="utf-8",
+        )
+        self.assertIsNone(workqueue._go_target_from_runner(self.ctx))
+        config.write_text("tampered after preflight\n", encoding="utf-8")
+        self.assertIsNone(workqueue._go_target_from_runner(self.ctx))
+
     def test_go_filename_constraints_follow_go_build(self) -> None:
         # go/build ignores the segment before the first underscore, so a bare
         # `linux.go` or `linux_arm64.go` is built on darwin/arm64.
