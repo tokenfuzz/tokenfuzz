@@ -490,9 +490,17 @@ class Hits:
             )
 
     def run_target(self, coverage_dir: Path) -> tuple[Path, int | None]:
-        option_string = f"detect_leaks=0:coverage=1:halt_on_error=0:coverage_dir={coverage_dir}"
         environment = sanitizer.prepare_runtime_env("asan")
-        environment["ASAN_OPTIONS"] = option_string
+        # The replay must start the way the probe did: a target's configured
+        # options can suppress a startup defect, and dropping them aborted
+        # every replay before it read the input. Coverage keys go last so no
+        # configured or ambient option can switch them off.
+        environment["ASAN_OPTIONS"] = sanitizer.runtime_options(
+            "asan",
+            sanitizer.compose_options("asan", "detect_leaks=0:halt_on_error=0", self.config),
+            environment,
+            final=f"coverage=1:coverage_dir={coverage_dir}",
+        )
         output = coverage_dir / "target-output.raw"
         if self.args.mode == "generic":
             if self.config:

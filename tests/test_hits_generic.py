@@ -691,5 +691,42 @@ class GenericCoverageTests(unittest.TestCase):
         self.assertFalse(paired_timeout)
 
 
+
+class ReplayOptionTests(unittest.TestCase):
+    def test_coverage_replay_keeps_the_configured_sanitizer_options(self) -> None:
+        # A target's configured options can suppress a startup defect. The
+        # replay replaced them, so every coverage run aborted before it read
+        # the input and reported the same startup edges as a HIT or MISS.
+        import tempfile
+        module = importlib.machinery.SourceFileLoader(
+            "hits_module_options", str(HITS)).load_module()
+        seen: dict[str, str] = {}
+
+        def fake_run(_command, _timeout, **kwargs):
+            seen.update(kwargs["env"])
+            return SimpleNamespace(returncode=0)
+
+        with tempfile.TemporaryDirectory() as raw:
+            config = SimpleNamespace(
+                runner_env=[], sanitizer_options={"asan": "detect_container_overflow=0"},
+                sanitizer_suppressions_path=lambda _name: "",
+            )
+            stub = SimpleNamespace(
+                args=SimpleNamespace(mode="generic", timeout=5), config=config,
+                generic_binary=Path(raw) / "app", testcase=Path(raw) / "tc",
+                _generic_command_args=lambda: [],
+            )
+            with mock.patch.object(module, "run_timeout", side_effect=fake_run), \
+                 mock.patch.object(module.sanitizer_run, "configured_runner_cwd",
+                                   return_value=raw), \
+                 mock.patch.dict(os.environ, {"ASAN_OPTIONS": "coverage=0"}):
+                module.Hits.run_target(stub, Path(raw))
+            options = seen["ASAN_OPTIONS"]
+            self.assertIn("detect_container_overflow=0", options)
+            self.assertTrue(
+                options.endswith(f"coverage=1:coverage_dir={raw}"),
+                "coverage keys stay last so nothing earlier disables them",
+            )
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
