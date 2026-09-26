@@ -403,23 +403,41 @@ def extract_vote_batch(text: str) -> dict[str, dict]:
     return _keyed_votes(_parse_items_array(text, matches[-1].end() - 1))
 
 
+def adopt_pinned_session(artifact: Path) -> None:
+    """Judge under the threat model the artifact's results tree pinned.
+
+    Run by hand, this process inherits no audit session; left alone it would
+    judge against a `bytes` default or a stale value from another run. The
+    tree's threat model is authoritative, and its other variables fill only
+    what the caller left unset. One batch never spans two trees.
+    """
+    results = next(
+        (parent for parent in artifact.resolve().parents
+         if (parent / ".session-env").is_file()),
+        None,
+    )
+    if results is None:
+        return
+    for key, value in target_config.pinned_session_environment(results).items():
+        if key == "TARGET_ATTACKER_CONTROLS_CSV" or not os.environ.get(key):
+            os.environ[key] = value
+
+
 def main(argv=None) -> int:
     args = parse_args(argv)
     if not args.finding and not args.batch_manifest:
         print("FATAL: --finding or --batch-manifest is required", file=sys.stderr)
         return 4
-    if args.finding:
-        # Run by hand, a review still judges under the threat model its
-        # results tree pinned, not a bytes default.
-        results = next(
-            (parent for parent in Path(args.finding).resolve().parents
-             if (parent / ".session-env").is_file()),
-            None,
-        )
-        if results is not None:
-            for key, value in target_config.pinned_session_environment(results).items():
-                if not os.environ.get(key):
-                    os.environ[key] = value
+    reviewed = args.finding
+    if not reviewed:
+        try:
+            reviewed = json.loads(
+                Path(args.batch_manifest).read_text(encoding="utf-8")
+            )["items"][0]["finding"]
+        except (OSError, ValueError, KeyError, IndexError, TypeError):
+            reviewed = ""  # the manifest checks below report it
+    if reviewed:
+        adopt_pinned_session(Path(str(reviewed)))
     if args.batch_manifest:
         if args.gate != "trigger":
             print("FATAL: batch manifests support only the trigger gate", file=sys.stderr)

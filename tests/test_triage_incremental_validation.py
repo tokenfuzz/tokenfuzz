@@ -3275,7 +3275,38 @@ Generated score text.
         self.assertEqual(seen, [["bytes", "race"]])
         with mock.patch.dict(os.environ, {"TARGET_ATTACKER_CONTROLS_CSV": "bytes"}):
             gate(self.root)
-        self.assertEqual(seen[-1], ["bytes"], "an explicit caller setting still wins")
+            self.assertEqual(os.environ["TARGET_ATTACKER_CONTROLS_CSV"], "bytes")
+        self.assertEqual(
+            seen[-1], ["bytes", "race"], "a stale caller value cannot replace the pin",
+        )
+        # Two gate calls on one tree can finish in either order; the first to
+        # finish must not restore the environment under the other.
+        with mock.patch.dict(os.environ, {"TARGET_ATTACKER_CONTROLS_CSV": ""}):
+            first, second = triage.pinned_session(self.root), triage.pinned_session(self.root)
+            first.__enter__()
+            second.__enter__()
+            first.__exit__(None, None, None)
+            self.assertEqual(os.environ["TARGET_ATTACKER_CONTROLS_CSV"], "bytes,race")
+            second.__exit__(None, None, None)
+            self.assertEqual(os.environ["TARGET_ATTACKER_CONTROLS_CSV"], "")
+            # A tree with another threat model cannot share the process
+            # environment; refusing it must leave nothing held.
+            other = self.root / "other-results"
+            other.mkdir()
+            other_config = other / ".target.toml"
+            other_config.write_text(
+                'target = "sampleproj"\n[threat_model]\nattacker_controls = ["bytes"]\n',
+                encoding="utf-8",
+            )
+            (other / ".session-env").write_text(
+                f"RESULTS_DIR={other}\nTARGET_SLUG=sampleproj\n"
+                f"TARGET_CONFIG_SHA256={hashlib.sha256(other_config.read_bytes()).hexdigest()}\n",
+                encoding="utf-8",
+            )
+            with triage.pinned_session(self.root):
+                with self.assertRaises(RuntimeError):
+                    triage.pinned_session(other).__enter__()
+            self.assertEqual(triage._PINNED, {})
 
     def test_publication_rejection_is_requeued_only_when_its_review_is_stale(self) -> None:
         rejected = self.root / "findings-rejected"

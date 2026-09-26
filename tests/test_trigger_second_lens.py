@@ -147,5 +147,28 @@ class SecondLensTests(unittest.TestCase):
         self.assertEqual(outcomes, ["FAIL turn-cap", "FAIL parse"])
 
 
+    def test_a_hand_run_review_judges_under_the_pinned_threat_model(self) -> None:
+        import hashlib
+        loader = __import__("importlib.machinery", fromlist=["SourceFileLoader"])
+        module = loader.SourceFileLoader("validate_finding_cli", str(ROOT / "bin" / "validate-finding")).load_module()
+        config = self.root / ".target.toml"
+        config.write_text(
+            'target = "sampleproj"\n[threat_model]\nattacker_controls = ["bytes", "race"]\n',
+            encoding="utf-8",
+        )
+        (self.root / ".session-env").write_text(
+            f"RESULTS_DIR={self.root}\nTARGET_ROOT={self.target}\n"
+            f"TARGET_CONFIG_SHA256={hashlib.sha256(config.read_bytes()).hexdigest()}\n",
+            encoding="utf-8",
+        )
+        report = self.finding / "report.md"
+        with mock.patch.dict(os.environ, {
+            "TARGET_ATTACKER_CONTROLS_CSV": "bytes", "TARGET_ROOT": "/elsewhere",
+        }):
+            module.adopt_pinned_session(report)
+            self.assertEqual(os.environ["TARGET_ATTACKER_CONTROLS_CSV"], "bytes,race")
+            self.assertEqual(os.environ["TARGET_ROOT"], "/elsewhere",
+                             "the caller's checkout still wins")
+
 if __name__ == "__main__":
     unittest.main()
