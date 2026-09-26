@@ -6,9 +6,8 @@ them:
 
   inventory   what fuzz harnesses this target already has, and what each
               one is structurally unable to reach
-  candidates  every exported API run through the admission gate, so a new
-              harness is written only where untrusted input reaches a
-              published API that nothing already drives
+  candidates  every exported API run through the structural admission gate;
+              trace product input reachability before writing a harness
   template    a harness skeleton for one admitted symbol, built to be
               compiled two ways — as a libFuzzer target and as a standalone
               driver bin/probe can replay one artifact against; its receipt
@@ -224,11 +223,14 @@ def cmd_candidates(args) -> int:
     print(f"{len(admitted)} admitted of {len(found)} declared exported symbols "
           f"in {config.slug} (attacker_controls: "
           f"{', '.join(config.attacker_controls) or 'none'})\n")
+    print("Admission checks the declaration's input shape, not product "
+          "reachability. Trace a product input route to the selected API "
+          "before building a harness.\n")
     for candidate in admitted[:args.limit]:
         print(f"  {candidate.symbol}"
               + (f"  ({candidate.source_name})" if candidate.source_name else ""))
         print(f"    {candidate.declaration}")
-        print(f"    reachable by: {', '.join(candidate.controls)} "
+        print(f"    shape compatible with: {', '.join(candidate.controls)} "
               f"via {', '.join(candidate.shapes)}")
         if candidate.route:
             print(f"    {candidate.route}")
@@ -248,7 +250,7 @@ TEMPLATE = '''// TARGET: {target}
 //
 // Boundary-directed fuzz target for {symbol}.
 //   declaration: {declaration}
-//   admitted:    {controls} reach it via {shapes}
+//   shape compatible with: {controls} via {shapes}
 //
 // S4-RECEIPT BOUNDARY: {symbol}
 // S4-RECEIPT CONTROLS: {controls}
@@ -427,8 +429,8 @@ def cmd_template(args) -> int:
             "read those locations and replace the UNRESOLVED receipt fields "
             "before building")
     else:
-        say("no local caller example found; the receipt stays UNRESOLVED and "
-            "does not block the declaration-first workflow")
+        say("no local caller example found; verify a product input route "
+            "before building this harness. The receipt stays UNRESOLVED")
     print(destination)
     return 0
 

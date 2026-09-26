@@ -38,17 +38,18 @@ under `$RESULTS_DIR/fuzz/`:
 | `fuzz/campaign.jsonl` | Every slice's verdict and measurements. |
 | `fuzz/state.json` | Per-harness history and quarantine state. |
 
-## Only three facts admit an API
+## Three structural checks admit a candidate
 
-`bin/fuzz candidates` admits a symbol when all three checks hold. Header and
-harness call-site scanning is syntactic, so review the reported declaration
-and existing harness before writing a new one:
+`bin/fuzz candidates` admits a symbol when all three checks hold. These checks
+establish structural fit, not that the audited product routes untrusted input
+to the symbol. Review the reported declaration and trace a product input route
+before writing a new harness:
 
 1. **Published**: present in the exported symbol table of `<san>_lib` or a
    configured linked library, and not a reserved (`_`-prefixed) identifier.
    The second half matters for a static archive: an archive has no export
    list, so `nm` reports every cross-file helper as global.
-2. **Untrusted-reachable**: its declaration in a public header carries a
+2. **Input-shape compatible**: its declaration in a public header carries a
    parameter shape the target's `[threat_model].attacker_controls` can supply.
    `bytes` reaches a buffer+length, a string, or a stream; `fs-state` reaches
    a path; `call-sequence` reaches an opaque handle.
@@ -60,14 +61,21 @@ Rejections are reported with their reason, so an empty result is diagnostic:
 $ bin/fuzz candidates
 2 admitted of 5 declared exported symbols in vulnlib (attacker_controls: bytes, call-sequence)
 
+Admission checks the declaration's input shape, not product reachability. Trace a product input route to the selected API before building a harness.
+
   vl_parse
     int vl_parse(struct vl_ctx *c, const unsigned char *data, size_t len);
-    reachable by: bytes, call-sequence via buffer+length, opaque state handle
+    shape compatible with: bytes, call-sequence via buffer+length, opaque state handle
 ```
 
 Widening `attacker_controls` in `target.toml` widens what is admitted, which
 is the point. A target whose threat model is `bytes` should not get a harness
 that fuzzes filenames.
+
+For a vendored API, an exported header and the function's own definition do
+not establish a product route. If no product caller or documented entry can
+be traced to the chosen symbol, select another candidate and retain the lead
+for source review.
 
 ## Ground the harness in local callers
 
@@ -78,10 +86,10 @@ writing setup code. They commonly reveal constructors, related length and
 capacity arguments, ownership transfer, and teardown that a declaration
 cannot express.
 
-The caller is construction evidence, not reachability evidence. Test code may
-perform trusted setup unavailable to an attacker, so it cannot override the
-published/untrusted/uncovered admission gate. When no example exists, the
-template records `UNRESOLVED` and continues from the public declaration.
+The caller is construction evidence, not proof of product reachability. Test
+code may perform trusted setup unavailable to an attacker. When no example
+exists, the template records `UNRESOLVED`; verify product ingress before
+building from the public declaration.
 
 Fill the receipt's `INPUT-BUFFER`, `CONSTRUCTOR`, `ARG-RELATIONS`,
 `RESOURCE-FLOW`, and `TEARDOWN` fields with source-anchored facts.

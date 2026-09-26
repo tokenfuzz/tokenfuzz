@@ -2563,8 +2563,9 @@ def campaign_card(ctx: Context) -> dict:
         "created_at": now_iso(),
         "reason": (
             "boundary-directed fuzzing campaign for the whole target; "
-            "run `bin/fuzz candidates` to see which published APIs untrusted "
-            "input reaches and no harness drives"
+            "run `bin/fuzz candidates` for published APIs with compatible "
+            "input shapes and no harness, then trace a product input route "
+            "to the chosen API"
         ),
     }
 

@@ -10,7 +10,8 @@ functions never repay that. This module admits a candidate only when three
 structural facts hold at once: the build actually *publishes* the symbol, its
 declaration takes a parameter shape the target's own declared
 ``attacker_controls`` can supply, and no harness in the tree already drives
-it. Each is read from a structured source — the artifact's symbol table, the
+it. This is shape compatibility, not proof that the audited product calls the
+symbol from untrusted input. Each is read from a structured source — the artifact's symbol table, the
 public header's declaration, the harness sources on disk — not guessed from a
 name. A candidate failing any one is reported with the reason it failed, so
 "no candidates" is an answer rather than a silence.

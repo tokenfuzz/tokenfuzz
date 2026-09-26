@@ -4,9 +4,10 @@
 **Method.** The only strategy that runs a fuzzer. Build a fuzz target only where
 untrusted input reaches a published API directly, run it in short slices, and
 hand every artifact to `bin/probe --confirm`. Workflow: `bin/fuzz inventory`,
-`bin/fuzz candidates` (admits a symbol only when it is published, reachable by
-this target's `attacker_controls` shape, and uncovered by an existing harness),
-`bin/fuzz template <symbol>`, fill the `S4-RECEIPT` fields from local callers
+`bin/fuzz candidates` (admits a symbol only when it is published, has a
+parameter shape compatible with this target's `attacker_controls`, and is
+uncovered by an existing harness), trace a product input route to that exact
+API, then `bin/fuzz template <symbol>` and fill the `S4-RECEIPT` fields from local callers
 read with `bin/peek`, `bin/fuzz build` (refuses byte-to-struct casts, private
 headers, and hand-declared symbols), `bin/fuzz run --budget-seconds N`,
 `bin/fuzz status`. The `INPUT-BUFFER` receipt line quotes how the grounding
@@ -49,7 +50,7 @@ by your good intentions.
 
 | Failure | What it looks like | Countermeasure |
 |---|---|---|
-| **Fuzzing the wrong thing** | A harness on an internal helper no caller can reach with untrusted data. Runs forever, finds "bugs" nobody can trigger. | The admission gate (below). `bin/fuzz candidates` will not admit it. |
+| **Fuzzing the wrong thing** | A harness on an API no product caller reaches with untrusted data. Runs forever, finds "bugs" nobody can trigger. | Trace the selected API from a product input route before building. The structural admission gate alone cannot prove this. |
 | **Fake targets** | The harness casts fuzzer bytes into a struct, includes a private header, or hand-declares a symbol. Every crash is fiction. | `bin/fuzz build` **refuses** those three shapes and names the repair. A lint, not a proof — it catches the common forgeries, not every one. |
 | **Unverifiable crashes** | A fuzzer artifact filed as a finding with no confirmation, no dedup, no gate. | Every artifact is replayed by `bin/probe --confirm`. Nothing is filed any other way. |
 
@@ -65,14 +66,15 @@ three must hold. Each comes from a structured source, not a guess:
    emit is not the boundary, and a static archive publishes every
    cross-file helper it has, so a leading underscore is taken at its word: C
    reserves that spelling for the implementation.
-2. **Untrusted-reachable** — the declaration in a public header carries a
+2. **Input-shape compatible** — the declaration in a public header carries a
    parameter shape that this target's `[threat_model].attacker_controls` can
    actually supply. `bytes` reaches a buffer+length, a NUL-terminated string,
    or a stream; `fs-state` reaches a path; `call-sequence` reaches an opaque
    handle. A function taking only integers is reachable by nobody.
    The shape is read from the declaration, so a non-`const` pointer that is
    really an *output* buffer can still be admitted — check the direction
-   before writing the harness.
+   before writing the harness. This does not prove that the audited product
+   routes untrusted input to that symbol.
 3. **Uncovered** — no harness already in the tree drives it. If one does, the
    work is *improvement*, not generation. See below.
 
@@ -82,6 +84,13 @@ admitted" is an answer you can act on rather than a silence.
 The call graph ranks admitted candidates and never gates them. A syntactic
 graph is blind to indirect dispatch, so "no path" is not evidence of
 unreachability — the same rule the work-card call-neighbourhood block obeys.
+
+Before choosing an admitted symbol, locate its actual product caller or a
+documented product entry that invokes it, and trace how the declared untrusted
+input reaches the call. For vendored code, an exported header and a wrapper's
+own definition do not establish a route from the product. If the route remains
+unresolved, choose another candidate or improve an existing harness; retain
+the unresolved lead for source review rather than spending the fuzz budget.
 
 ---
 
@@ -135,7 +144,8 @@ convention.
 
 Complete the `S4-RECEIPT` comments at the top of the source:
 
-- `SOURCE-USAGE` — the local caller locations actually read;
+- `SOURCE-USAGE` — the local caller locations actually read, including the
+  product route; the selected function's own definition is not a caller;
 - `INPUT-BUFFER` — how that caller allocates the input it passes: quote the
   allocation, and name any trailing padding, terminator, alignment, or
   minimum size it guarantees. Set the template's `FZ_INPUT_PADDING` to that

@@ -21,6 +21,8 @@ from __future__ import annotations
 import hashlib
 import importlib.machinery
 import importlib.util
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -741,6 +743,8 @@ class ContractFaithfulnessTests(unittest.TestCase):
         # Both entry points must survive, or an artifact cannot be replayed.
         self.assertIn("LLVMFuzzerTestOneInput", rendered)
         self.assertIn("#ifndef FUZZ_CAMPAIGN_BUILD", rendered)
+        self.assertIn("shape compatible with: bytes via buffer+length", rendered)
+        self.assertNotIn("bytes reach it", rendered)
         for field in (
             "BOUNDARY", "CONTROLS", "DECLARATION", "SOURCE-USAGE",
             "INPUT-BUFFER", "CONSTRUCTOR", "ARG-RELATIONS", "RESOURCE-FLOW",
@@ -889,6 +893,36 @@ class HarnessReceiptTests(unittest.TestCase):
 
 
 class TemplateLanguageTests(unittest.TestCase):
+    def test_candidate_output_does_not_claim_product_reachability_from_shape(self) -> None:
+        loader = importlib.machinery.SourceFileLoader(
+            "fuzz_cli_candidates_test", str(ROOT / "bin" / "fuzz"))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        assert spec is not None
+        module = importlib.util.module_from_spec(spec)
+        loader.exec_module(module)
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw) / "target"
+            (root / "api").mkdir(parents=True)
+            (root / "api" / "pub.h").write_text(
+                "int app_parse(const unsigned char *data, size_t size);\n")
+            config = config_for(root, ["bytes"])
+            config.includes = ["api"]
+            args = SimpleNamespace(
+                results_dir=config.results_dir, sanitizer="asan", json=False,
+                limit=10,
+            )
+            out = io.StringIO()
+            with (mock.patch.object(module, "load_config", return_value=config),
+                  mock.patch.object(module, "exported_symbols",
+                                    return_value={"app_parse"}),
+                  mock.patch.object(module, "discovered", return_value=[]),
+                  mock.patch.object(module, "entry_routes", return_value={}),
+                  contextlib.redirect_stdout(out)):
+                self.assertEqual(module.cmd_candidates(args), 0)
+        self.assertIn("shape compatible with: bytes", out.getvalue())
+        self.assertIn("Trace a product input route", out.getvalue())
+        self.assertNotIn("reachable by: bytes", out.getvalue())
+
     def test_a_c_export_uses_cpp_when_target_flags_require_cpp(self) -> None:
         loader = importlib.machinery.SourceFileLoader(
             "fuzz_cli_test", str(ROOT / "bin" / "fuzz"))
@@ -909,10 +943,13 @@ class TemplateLanguageTests(unittest.TestCase):
                 symbol="app_parse", output="", target="", hypothesis_id="",
                 force=False,
             )
+            warnings = io.StringIO()
             with (mock.patch.object(module, "load_config", return_value=config),
                   mock.patch.object(module, "exported_symbols",
-                                    return_value={"app_parse"})):
+                                    return_value={"app_parse"}),
+                  contextlib.redirect_stderr(warnings)):
                 self.assertEqual(module.cmd_template(args), 0)
+            self.assertIn("verify a product input route", warnings.getvalue())
             self.assertTrue(
                 (Path(config.results_dir) / "fuzz/src/fuzz_app_parse.cc").is_file())
 
