@@ -369,7 +369,10 @@ def sanitizer_runtime_env_block(
     extra_options: str = "",
     mode: str = "",
     recorded_env_options: str = "",
+    runner_options_shell: str = "",
 ) -> str:
+    """`runner_options_shell` is a rendered [runner].env options value, layered
+    after the harness options as the probe layers it, never replacing them."""
     meta = sanitizer_meta(sanitizer)
     unset_env = meta["unset_env"]
     env_name = meta["env"]
@@ -381,9 +384,10 @@ def sanitizer_runtime_env_block(
         recorded_env_options,
     )
     quoted = shq(base)
+    runner = f":{runner_options_shell}" if runner_options_shell else ""
     return (
         f"unset {unset_env}\n"
-        f'{env_name}={quoted}"${{{env_name}:+:${env_name}}}" \\\n'
+        f'{env_name}={quoted}{runner}"${{{env_name}:+:${env_name}}}" \\\n'
     )
 
 
@@ -2680,7 +2684,9 @@ def _is_bundle_filename(name: str) -> bool:
     return False
 
 
-def _browser_shell_value(value: str, *, sanitizer: str, slug: str) -> str:
+def _browser_shell_value(
+    value: str, *, sanitizer: str, slug: str, testcase: str = '"$testcase_url"',
+) -> str:
     """Render one configured browser value while preserving runtime tokens."""
     known_tokens = {
         "{SANITIZER}", "{TARGET_SLUG}", "{NULL_DEVICE}",
@@ -2714,7 +2720,7 @@ def _browser_shell_value(value: str, *, sanitizer: str, slug: str) -> str:
         value = value.replace(token, replacement)
     variables = {
         "{PROFILE}": '"$profile"',
-        "{TESTCASE}": '"$testcase_url"',
+        "{TESTCASE}": testcase,
         "{TARGET_ROOT}": '"$src"',
         "{RESULTS_DIR}": '"$here"',
     }
@@ -2756,9 +2762,34 @@ def _testcase_shell_arg(value: str, testcase_shell: str) -> str:
     return "".join(rendered) or "''"
 
 
-def _browser_shell_env(
+def _runner_sanitizer_options(
+    entries: list[str], *, sanitizer: str, slug: str, testcase: str,
+) -> tuple[str, list[str]]:
+    """Split the sanitizer's options out of a [runner].env.
+
+    The probe layers such an entry over the harness options; replayed as a
+    later shell prefix it would replace them. Returns the rendered value for
+    sanitizer_runtime_env_block and the remaining entries.
+    """
+    name = sanitizer_meta(sanitizer)["env"]
+    options, rest = "", []
+    for entry in entries:
+        key, separator, value = entry.partition("=")
+        if name and separator and key == name:
+            options = (
+                _browser_shell_value(value, sanitizer=sanitizer, slug=slug, testcase=testcase)
+                if value else ""
+            )
+        else:
+            rest.append(entry)
+    return options, rest
+
+
+def _runner_shell_env(
     entries: list[str], *, sanitizer: str, slug: str, build_system: str,
+    testcase: str = '"$testcase_url"',
 ) -> str:
+    """Shell `KEY=value \\` prefixes that replay a configured [runner].env."""
     replay = list(entries)
     if build_system == "mach":
         replay = [
@@ -2768,10 +2799,10 @@ def _browser_shell_env(
     for entry in replay:
         key, separator, value = entry.partition("=")
         if not separator or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
-            die(f"invalid browser runner environment entry: {entry!r}")
+            die(f"invalid runner environment entry: {entry!r}")
         lines.append(
             f"{key}="
-            f"{_browser_shell_value(value, sanitizer=sanitizer, slug=slug)} \\\n"
+            f"{_browser_shell_value(value, sanitizer=sanitizer, slug=slug, testcase=testcase)} \\\n"
         )
     return "".join(lines)
 
@@ -2792,6 +2823,10 @@ def write_browser_template(out: Path, *, build_system: str, upstream_url: str,
         if runner_args
         else target_config.browser_runner_defaults(build_system).get("args", [])
     )
+    runner_options, other_runner_env = _runner_sanitizer_options(
+        list(runner_env or []), sanitizer=sanitizer, slug=slug,
+        testcase='"$testcase_url"',
+    )
     text = (
         emit_preamble(build_system, upstream_url, pinned_rev, slug, san_bin_rel, sanitizer)
         + emit_build(build_system, sanitizer=sanitizer,
@@ -2803,10 +2838,11 @@ def write_browser_template(out: Path, *, build_system: str, upstream_url: str,
             __SANITIZER_LABEL__=meta["label"],
             __MACH_OBJDIR__=meta["mach_objdir"],
             __SANITIZER_ENV_BLOCK__=sanitizer_runtime_env_block(
-                sanitizer, extra_options, mode, recorded_env_options
+                sanitizer, extra_options, mode, recorded_env_options,
+                runner_options,
             ),
-            __RUNNER_ENV_BLOCK__=_browser_shell_env(
-                list(runner_env or []),
+            __RUNNER_ENV_BLOCK__=_runner_shell_env(
+                other_runner_env,
                 sanitizer=sanitizer, slug=slug, build_system=build_system,
             ),
             __BROWSER_ARGS__=_browser_shell_args(
@@ -3013,13 +3049,22 @@ def write_go_source_template(out: Path, *, upstream_url: str, pinned_rev: str,
                              slug: str, input_name: str, sanitizer: str,
                              local_src: str, runner_args: list[str],
                              extra_options: str = "", mode: str = "generic",
-                             recorded_env_options: str = "") -> None:
-    """Replay a direct Go testcase in the pinned module, not a product binary."""
+                             recorded_env_options: str = "",
+                             runner_env: list[str] | None = None) -> None:
+    """Replay a direct Go testcase in the pinned module, not a product binary.
+
+    The configured [runner].env replays too: it keeps `go run` read-only on
+    the module (`GOFLAGS=-mod=readonly`) and halts on the first race, as the
+    audit's probe did.
+    """
     args = runner_args or ["run", *(["-race"] if sanitizer == "race" else []),
                            crash_artifacts.TESTCASE_TOKEN]
     if not any(crash_artifacts.TESTCASE_TOKEN in arg for arg in args):
         args = [*args, crash_artifacts.TESTCASE_TOKEN]
     command = " ".join(_testcase_shell_arg(arg, '"$testcase"') for arg in args)
+    runner_options, other_runner_env = _runner_sanitizer_options(
+        list(runner_env or []), sanitizer=sanitizer, slug=slug, testcase='"$testcase"',
+    )
     text = (
         emit_preamble("go", upstream_url, pinned_rev, slug, "", sanitizer,
                       local_src)
@@ -3029,7 +3074,9 @@ def write_go_source_template(out: Path, *, upstream_url: str, pinned_rev: str,
         + 'cd "$src"\n'
         + "rc=0\n"
         + sanitizer_runtime_env_block(sanitizer, extra_options, mode,
-                                      recorded_env_options)
+                                      recorded_env_options, runner_options)
+        + _runner_shell_env(other_runner_env, sanitizer=sanitizer,
+                            slug=slug, build_system="go", testcase='"$testcase"')
         + f'go {command} || rc=$?\n'
         + 'echo "[repro] exit=$rc" >&2\nexit "$rc"\n'
     )
@@ -3754,6 +3801,7 @@ def main(argv: list[str]) -> int:
                 extra_options=sanitizer_extra_options,
                 mode=run_mode or "generic",
                 recorded_env_options=recorded_env_options,
+                runner_env=list(cfg.runner_env),
             )
         elif input_name:
             # Replay the recorded argv when the crash needs non-default flags;

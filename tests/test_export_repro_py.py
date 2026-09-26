@@ -3030,8 +3030,13 @@ er.write_go_source_template(
     _go_out, upstream_url="FILL_ME", pinned_rev="norev", slug="sampleproj",
     input_name="input.go", sanitizer="race", local_src="",
     runner_args=["run", "-race", "{TESTCASE}"],
+    runner_env=["GOFLAGS=-mod=readonly", "GOCACHE={TARGET_ROOT}/.audit/go-build"],
 )
 _go_text = _go_out.read_text(encoding="utf-8")
+assert_in("GOFLAGS=-mod=readonly", _go_text,
+          "write_go_source_template: keeps the probe's read-only module mode")
+assert_in('GOCACHE="$src"/.audit/go-build', _go_text,
+          "write_go_source_template: maps runner paths onto the maintainer checkout")
 assert_in('go run -race "$testcase"', _go_text,
           "write_go_source_template: replays recorded source route")
 assert_not_in('go build', _go_text,
@@ -3041,7 +3046,7 @@ _go_src.mkdir()
 (_go_out.parent / "input.go").write_text("package main\nfunc main() {}\n", encoding="utf-8")
 _fake_bin = TMP / "fake-go-bin"
 _fake_bin.mkdir()
-(_fake_bin / "go").write_text('#!/bin/sh\nprintf "%s\\n" "$PWD" "$@" > "$GO_CAPTURE"\nexit 17\n', encoding="utf-8")
+(_fake_bin / "go").write_text('#!/bin/sh\nprintf "%s\\n" "$PWD" "$@" "$GOFLAGS" > "$GO_CAPTURE"\nexit 17\n', encoding="utf-8")
 (_fake_bin / "go").chmod(0o755)
 _capture = TMP / "go-replay-args"
 _go_env = os.environ.copy()
@@ -3050,9 +3055,35 @@ _go_run = subprocess.run([str(_go_out), str(_go_src)], env=_go_env,
                          capture_output=True, text=True)
 assert_eq(17, _go_run.returncode,
           "write_go_source_template: preserves source program exit status")
-assert_eq([str(_go_src), "run", "-race", str(_go_out.parent / "input.go")],
+assert_eq([str(_go_src), "run", "-race", str(_go_out.parent / "input.go"), "-mod=readonly"],
           _capture.read_text(encoding="utf-8").splitlines() if _capture.exists() else [],
           "write_go_source_template: executes from target root with staged source")
+
+# A [runner].env options entry layers over the harness options, as the probe
+# layers it; a later shell prefix used to replace them. {TESTCASE} names the
+# staged source, not a browser URL.
+_go_asan_out = TMP / "reproduce-go-asan.sh"
+er.write_go_source_template(
+    _go_asan_out, upstream_url="FILL_ME", pinned_rev="norev", slug="sampleproj",
+    input_name="input.go", sanitizer="asan", local_src="",
+    runner_args=["run", "{TESTCASE}"],
+    runner_env=["ASAN_OPTIONS=detect_odr_violation=0", "SAMPLE_INPUT={TESTCASE}"],
+)
+(_fake_bin / "go").write_text(
+    '#!/bin/sh\nprintf "%s\\n" "$ASAN_OPTIONS" "$SAMPLE_INPUT" > "$GO_CAPTURE"\nexit 0\n',
+    encoding="utf-8",
+)
+_go_asan_run = subprocess.run([str(_go_asan_out), str(_go_src)], env=_go_env,
+                              capture_output=True, text=True)
+assert_eq(0, _go_asan_run.returncode,
+          "write_go_source_template: runner env with {TESTCASE} replays", )
+_asan_seen = _capture.read_text(encoding="utf-8").splitlines() if _capture.exists() else ["", ""]
+assert_in("detect_odr_violation=0", _asan_seen[0],
+          "write_go_source_template: keeps the runner-env sanitizer option")
+assert_in(er.sanitizer_default_options("asan", "generic").split(":")[0], _asan_seen[0],
+          "write_go_source_template: a runner-env option does not replace the harness options")
+assert_eq(str(_go_asan_out.parent / "input.go"), _asan_seen[1],
+          "write_go_source_template: {TESTCASE} names the staged source")
 
 _js_out = TMP / "reproduce-js.sh"
 er.write_js_shell_template(
