@@ -494,6 +494,11 @@ def _extract_primitive(asan_text: str) -> str:
         return "double-free"
     if "attempting free on address which was not malloc" in lower or "bad-free" in lower:
         return "bad-free"
+    # Go runtime faults probe credits as crashes take the filing-time label,
+    # so a fault and a checkptr report at one site do not merge here.
+    go_key = crash_artifacts.sanitizer_fault_key(asan_text)
+    if go_key and go_key[1].startswith("go-"):
+        return go_key[1]
     return "unclassified"
 
 

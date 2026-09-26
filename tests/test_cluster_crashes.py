@@ -597,6 +597,20 @@ The parser writes past `{object_name}`.
         self.assertIn("auto-filed skeleton", row)
         self.assertIn("unfilled _TODO sections", row)
 
+    def test_go_fault_and_checkptr_are_distinct_primitives(self) -> None:
+        # Both returned `unclassified`, so a fault and a checkptr report at
+        # one site merged into one cluster and one unit of yield.
+        import importlib.machinery
+        module = importlib.machinery.SourceFileLoader(
+            "cluster_crashes_go", str(COMMAND)).load_module()
+        fault = (
+            "unexpected fault address 0x110390000\nfatal error: fault\n"
+            "[signal SIGSEGV: segmentation violation code=0x2 addr=0x110390000 pc=0x1]\n"
+        )
+        checkptr = "fatal error: checkptr: pointer arithmetic result points to invalid allocation\n"
+        self.assertEqual(module._extract_primitive(fault), "go-fault")
+        self.assertEqual(module._extract_primitive(checkptr), "go-checkptr")
+
     def test_finished_report_is_not_flagged_pending(self) -> None:
         self.make_crash(
             "CRASH-P2-1", "heap-use-after-free", "done_fn",
