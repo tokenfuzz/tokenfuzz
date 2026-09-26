@@ -885,6 +885,10 @@ def _disclosed_content_modified_impacts(
         return ({"MVC": "L"},
                 "disclosed content=same-context → bytes this caller already "
                 "handled, not another principal's → MVC:L")
+    if content == "limited-metadata":
+        return ({"MVC": "L", "MVA": "N"},
+                "disclosed content=limited-metadata → only a low-sensitivity "
+                "fact is exposed, with no availability loss → MVC:L/MVA:N")
     return {}, ""
 
 
@@ -962,8 +966,14 @@ def _cvss4_metrics(prim_key: str, surface_label: str, fields: dict,
     av_localised = local_only and av == "N"
     if av_localised:
         av = "L"
+    # An explicitly authenticated boundary has a credential precondition;
+    # the class-wide unauthenticated default must not override that evidence.
+    authenticated = bool(re.match(
+        r"^authenticated(?:\s|$)", fields.get("boundary", "").strip(), re.I,
+    ))
+    pr = "L" if authenticated else "N"
     metrics = {
-        "AV": av, "AC": "L", "AT": at, "PR": "N", "UI": ui,
+        "AV": av, "AC": "L", "AT": at, "PR": pr, "UI": ui,
         "VC": vc, "VI": vi, "VA": va, "SC": sc, "SI": si, "SA": sa,
     }
     e, e_note = _threat_metric(fields.get("_report_text", ""), fields, report_dir)
@@ -1000,7 +1010,9 @@ def _cvss4_metrics(prim_key: str, surface_label: str, fields: dict,
     else:
         notes.append(f"class preconditions → AT:{at}")
     notes += [
-        "PR:N (worst case — no auth signal), AC:L",
+        ("PR:L (authenticated boundary)" if authenticated
+         else "PR:N (worst case — no auth signal)"),
+        "AC:L",
         e_note,
         req_note,
     ]

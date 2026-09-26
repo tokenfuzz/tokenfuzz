@@ -1309,6 +1309,30 @@ class SeverityTests(unittest.TestCase):
             "info_leak", "library", {"disclosed_content": "cross-principal"}, False,
         )
         self.assertNotIn("MVC", cross)
+        metadata, _ = severity._cvss4_metrics(
+            "info_leak", "network",
+            {"boundary": "Authenticated page request with hidden paths disabled",
+             "disclosed_content": "limited-metadata"}, False,
+        )
+        self.assertEqual(metadata["PR"], "L")
+        self.assertEqual(metadata["MVC"], "L")
+        self.assertEqual(metadata["MVA"], "N")
+        unauthenticated, _ = severity._cvss4_metrics(
+            "info_leak", "network",
+            {"boundary": "Unauthenticated page request"}, False,
+        )
+        self.assertEqual(unauthenticated["PR"], "N")
+        report = self.make_report(
+            "directory existence disclosed",
+            report_id="FIND-limited-metadata", finding=True, surface="network",
+            extra_fields=(("Primitive", "info_leak"),
+                          ("Boundary", "Authenticated page request"),
+                          ("Disclosed content", "limited-metadata")),
+        )
+        scored = self.score(report)
+        self.assertIn("PR:L", scored["cvss"]["vector"])
+        self.assertIn("MVC:L", scored["cvss"]["vector"])
+        self.assertIn("MVA:N", scored["cvss"]["vector"])
         # A DoS-only class has nothing to disclose; the field cannot touch it.
         dos, _ = severity._cvss4_metrics(
             "null_deref", "library", {"disclosed_content": "fixed-or-zero"}, False,

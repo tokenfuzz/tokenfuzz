@@ -2855,6 +2855,12 @@ Generated score text.
             triage._valid_reach_field("disclosed_content", "cross-principal"),
             "cross-principal",
         )
+        # The scorer grades a narrow metadata disclosure, so the reviewer
+        # that fills the field must be able to answer with it too.
+        self.assertEqual(
+            triage._valid_reach_field("disclosed_content", "limited-metadata"),
+            "limited-metadata",
+        )
         self.assertEqual(
             triage._valid_reach_field("disclosed_content", "invented"), "",
         )

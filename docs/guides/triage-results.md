@@ -239,11 +239,14 @@ actually decides the fault, not every setup call the driver makes.
 `Parameter control` matters when a compiled harness supplies a value the
 external input does not directly choose.
 
-Two fields can appear in generated or older reports. `Disclosed content`
-grades what an information-disclosure report shows reaching the attacker.
-`Availability loss` is retained for compatibility with reports created before
-availability-only findings became unscored; it does not make such a candidate
-reportable.
+`Disclosed content` grades what an information-disclosure report shows reaching
+the attacker. Use `limited-metadata` for a proved disclosure of path existence
+or similarly narrow metadata; it reduces the scored confidentiality impact and
+removes availability impact. A `Boundary:` beginning with `Authenticated`
+records the login precondition, so the score uses `PR:L` instead of the
+unauthenticated worst case. `Availability loss` is retained for compatibility
+with reports created before availability-only findings became unscored; it
+does not make such a candidate reportable.
 
 `Cluster`, `Dedup frames`, severity text, and patch rendering are written by
 the harness. Do not hand-author those generated sections.

@@ -51,6 +51,10 @@ Summary is required; the TL;DR is built from it. Budgets are targets — under i
 fine, double is not. **Omit any other section you have no evidence for instead
 of filling it**: an invented Impact paragraph can invalidate a real finding.
 Write "exploitability beyond a crash is unproven" when that is the truth.
+For an information disclosure limited to path existence or similarly narrow
+metadata, add the bare field `Disclosed content: limited-metadata`. When the
+affected route requires a logged-in caller, begin `Boundary:` with
+`Authenticated`. Leave either fact unstated when unverified.
 
 Gloss each internal name on first use. One idea per sentence. Write "writes 5
 bytes past the end of a 72-byte allocation", not "OOB write". The fields table

@@ -980,6 +980,7 @@ _REACH_FIELD_ENUMS = {
     "advisory": {"yes", "no"},
     "disclosed_content": {
         "cross-principal", "same-context", "attacker-derived", "fixed-or-zero",
+        "limited-metadata",
     },
 }
 _SURFACE_KINDS = {"network", "library-api", "file-format", "cli", "dev-tool", "internal", "unknown"}
