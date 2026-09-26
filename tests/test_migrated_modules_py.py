@@ -1673,6 +1673,71 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         "a refused preflight records no estimated usage the provider never served",
     )
 
+    def _recovered_auth(_backend, prompt_text, _timeout, raw_log, **_kwargs):
+        token, sentinel = _preflight_command(prompt_text)
+        Path(sentinel).write_text(token, encoding="utf-8")
+        Path(raw_log).write_text('{"type":"result"}\n', encoding="utf-8")
+        return 0
+
+    def _launch_after_refusal() -> None:
+        with mock.patch.dict(
+            os.environ, {"AUDIT_MODEL_PREFLIGHT_ATTEMPTS": "1"}, clear=False,
+        ), mock.patch.object(
+            audit_runner.llm_invoke, "run_agent_prompt", side_effect=_recovered_auth,
+        ):
+            audit_runner.validate_model(model_runtime)
+
+    # Refused before its wall started: the relaunch is the only productive
+    # window, so the run is comparable.
+    _launch_after_refusal()
+    check(
+        not (model_runtime.logs / ".backend-unavailable").exists()
+        and (model_runtime.logs / ".run-quality").read_text().strip()
+        == "provider_recovered",
+        "a relaunch after a refusal before any wall clears the refusal",
+    )
+    # Refused after spending wall: the relaunch starts a fresh budget, so the
+    # run's total exceeds one window and must stay non-comparable.
+    (model_runtime.logs / ".backend-unavailable").touch()
+    (model_runtime.logs / ".run-quality").write_text("provider_limited\n", encoding="utf-8")
+    (model_runtime.logs / ".housekeeping_secs").write_text("12.0\n", encoding="utf-8")
+    _launch_after_refusal()
+    check(
+        (model_runtime.logs / ".backend-unavailable").exists()
+        and (model_runtime.logs / ".run-quality").read_text().strip()
+        == "provider_limited",
+        "a relaunch after wall was spent keeps the run non-comparable",
+    )
+    (model_runtime.logs / ".backend-unavailable").unlink()
+    (model_runtime.logs / ".housekeeping_secs").unlink()
+
+    retry_attempts = []
+
+    def _stale_refusal_then_recovered(_backend, prompt_text, _timeout, raw_log, **_kwargs):
+        retry_attempts.append(None)
+        if len(retry_attempts) == 1:
+            # Exits 0 with refusal text and does not act: retried, not refused.
+            Path(raw_log).write_text(
+                '{"type":"error","message":"unexpected status 401 Unauthorized"}\n',
+                encoding="utf-8",
+            )
+            return 0
+        if len(retry_attempts) == 2:
+            return 1  # Fails before writing; the refusal on disk is stale.
+        return _recovered_auth(_backend, prompt_text, _timeout, raw_log)
+
+    with mock.patch.dict(
+        os.environ, {"AUDIT_MODEL_PREFLIGHT_ATTEMPTS": "3"}, clear=False,
+    ), mock.patch.object(
+        audit_runner.llm_invoke, "run_agent_prompt",
+        side_effect=_stale_refusal_then_recovered,
+    ), mock.patch.object(audit_runner.time, "sleep"):
+        audit_runner.validate_model(model_runtime)
+    check(
+        len(retry_attempts) == 3,
+        "a previous attempt's refusal cannot classify a fresh failure",
+    )
+
     # The per-session tally is telemetry, not a verdict: it is how a run that
     # could not act is diagnosed afterwards. A tool count cannot tell a blocked
     # agent from one that read its state and concluded, and a session denied

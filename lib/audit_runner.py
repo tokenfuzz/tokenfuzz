@@ -625,6 +625,9 @@ def validate_model(runtime: Runtime, audit_guide: str = "") -> None:
             # an attempt that then failed would pass the next one, which need
             # only exit zero without acting.
             sentinel.unlink(missing_ok=True)
+            # A CLI that fails before writing must not leave the previous
+            # attempt's refusal to be classified as this one's.
+            raw.unlink(missing_ok=True)
             last_rc = llm_invoke.run_agent_prompt(
                 runtime.backend, prompt_text, timeout_secs, raw,
                 model=runtime.model, max_turns=6,
@@ -699,6 +702,20 @@ def validate_model(runtime: Runtime, audit_guide: str = "") -> None:
                 raw.unlink(missing_ok=True)
                 if agy_log is not None:
                     agy_log.unlink(missing_ok=True)
+                unavailable = runtime.logs / ".backend-unavailable"
+                if (
+                    unavailable.is_file()
+                    and not (runtime.logs / ".housekeeping_secs").is_file()
+                ):
+                    # The earlier launch was refused before its wall started
+                    # (initialize_backend writes .housekeeping_secs), so this
+                    # launch is the run's only productive window. After one
+                    # that spent wall, a relaunch gets a fresh budget and the
+                    # run stays marked non-comparable.
+                    unavailable.unlink()
+                    (runtime.logs / ".run-quality").write_text(
+                        "provider_recovered\n", encoding="utf-8",
+                    )
                 index_log(runtime, f"Model preflight passed: backend={runtime.backend} model={runtime.model}")
                 return
             if runtime.backend == "codex":
