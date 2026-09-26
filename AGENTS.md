@@ -31,17 +31,17 @@ Each agent has a role set by the harness:
 - **reproduce** (default): Write testcases, run the sanitizer, produce crashes.
   Follow the strategy assigned by the harness on your work card — the queue
   ranker has already weighed prior-fix sites, coverage gaps, and structural
-  ranking against each other. Do NOT hard-default to S1; the queue may have
+  ranking against each other. Don't hard-default to S1; the queue may have
   placed a higher-signal card in front of you. First testcase by turn 20.
-- **analysis**: Deep code review, data-flow tracing, hypothesis generation.
-  Spend 80% reading code, 20% writing minimal probes. Hand off NEEDS_TESTCASE
-  hypotheses to reproduce agents.
+- **analysis**: Deep code review, data-flow tracing, hypothesis generation,
+  with minimal probes that confirm the target path executes. Hand off
+  NEEDS_TESTCASE hypotheses to reproduce agents.
 
 ## CRITICAL RULES
 
-1. **File concrete security findings; reproduce where feasible.** File a security issue under `findings/` the moment you can name it (file:function:line + issue class + impact) — a reproducer is NOT required. Promotion to `crashes/` DOES require a runnable testcase + sanitizer output on disk.
-2. **ONE finding at a time.** Confirm or discard before moving on.
-3. **RUN `bin/probe` FIRST; it coverage-gates when supported, then runs the configured sanitizer or runner.**
+1. **File concrete security findings; reproduce where feasible.** File a security issue under `findings/` the moment you can name it (file:function:line + issue class + impact) — a reproducer is not required. Promotion to `crashes/` does require a runnable testcase + sanitizer output on disk.
+2. **One finding at a time.** Confirm or discard before moving on.
+3. **Run testcases with `bin/probe`; it coverage-gates when supported, then runs the configured sanitizer or runner.**
    ```
    bin/probe "${RESULTS_DIR}/scratch-N/testcase.html"              # 1 run, exploration
    bin/probe --confirm "${RESULTS_DIR}/scratch-N/testcase.html"    # 5 runs, after first crash
@@ -67,8 +67,8 @@ Each agent has a role set by the harness:
 6. **Bugs cluster.** After confirming, search SAME FILE and neighbors before moving on.
 7. **Stay on one subsystem while exploring; expand to neighbors after a hit.** While a hypothesis is open and you have no confirmed CRASH/FIND in this subsystem yet, stick with it across strategy rotations — don't pivot files mid-investigation. After you confirm a crash or finding in this subsystem, the harness unlocks neighbor-subsystem cards for you (productive-agent relaxation in `_claim_next_card_locked`); follow Rule 6 and claim them. Pre-confirmation pivots are wasted context cost.
 8. **Iterate on non-diagnostic runs.** Try: allocator shaping, GC interleaving, multi-trigger, object replacement. See `.agents/references/reproducer-templates.md`.
-9. **NEUTRAL VOCABULARY IS MANDATORY.** Categories: **bounds / lifetime / type / size / uninit / state** only. Always use engineering-standard language: `testcase` / `reproducer`, `caller-controlled` / `input-shaped`, `hand-crafted` / `regression`, `crafted` / `non-conforming`, `reach bounds` / `reach lifetime`, `out-of-range read/write`, `overwrite` / `stomp`, `memory-safety`. Required testcase header fields are `TARGET:`, `HYPOTHESIS-ID:`, `CATEGORY:`; S8 also requires `PROPERTY:`. Put them in the file's native comment syntax, e.g. `# TARGET:` for Python, `// TARGET:` for C/C++/JS, and `<!-- TARGET: ... -->` for HTML. Opaque byte inputs use `bin/probe --hypothesis-id H-...` instead of prepending text, plus `--property <kind>` under S8.
-10. **THE SESSION CONFIG IS IMMUTABLE.** Never edit `output/<slug>/target.toml` or the backend results `.target.toml` during an audit. The harness pins the post-preflight configuration so concurrent agents cannot retarget one another's probes or change the threat model behind recorded metrics. Fix testcase and harness source mistakes locally. For wrong runner/build metadata, record exact proof as `ENV-BLOCKED` for operator repair; do not guess paths, toggle `is_browser`, or replace `<san>_bin`.
+9. **Use neutral vocabulary.** Categories: **bounds / lifetime / type / size / uninit / state** only. Always use engineering-standard language: `testcase` / `reproducer`, `caller-controlled` / `input-shaped`, `hand-crafted` / `regression`, `crafted` / `non-conforming`, `reach bounds` / `reach lifetime`, `out-of-range read/write`, `overwrite` / `stomp`, `memory-safety`. Required testcase header fields are `TARGET:`, `HYPOTHESIS-ID:`, `CATEGORY:`; S8 also requires `PROPERTY:`. Put them in the file's native comment syntax, e.g. `# TARGET:` for Python, `// TARGET:` for C/C++/JS, and `<!-- TARGET: ... -->` for HTML. Opaque byte inputs use `bin/probe --hypothesis-id H-...` instead of prepending text, plus `--property <kind>` under S8.
+10. **The session config is immutable.** Never edit `output/<slug>/target.toml` or the backend results `.target.toml` during an audit. The harness pins the post-preflight configuration so concurrent agents cannot retarget one another's probes or change the threat model behind recorded metrics. Fix testcase and harness source mistakes locally. For wrong runner/build metadata, record exact proof as `ENV-BLOCKED` for operator repair; do not guess paths, toggle `is_browser`, or replace `<san>_bin`.
 
 ## Paths
 
@@ -89,7 +89,7 @@ Prefer the sanitizer wrappers (`bin/run-asan`, `bin/run-ubsan`, `bin/run-msan`,
 ## SESSION START
 
 1. Run `bin/state resume --agent <n>` for your agent first — structured JSONL is the source of truth for the hypothesis queue and resume position. Resume highest PENDING/NEEDS_TESTCASE.
-2. Leftover testcase without sanitizer output? Run the sanitizer NOW or delete.
+2. Leftover testcase without sanitizer output? Run the sanitizer now or delete it.
 3. **Cold start:** Use `bin/state add-hyp` to record 3-5 hypotheses from one subsystem.
 4. **After compression:** Start from structured state (`bin/state resume --agent <n>`); resume the top PENDING item before claiming new work, and do not re-read `PRIOR SESSION SEED` ranges.
 5. The harness embeds a condensed **session-rules digest** in your prompt (coverage-gate workflow, structured guard notes, search discipline, FIND quality bar). Rely on it. Read the full `.agents/references/session-rules.md` only if the digest is ambiguous for your situation — once read, it re-sends on every later turn.
@@ -100,10 +100,10 @@ Prefer the sanitizer wrappers (`bin/run-asan`, `bin/run-ubsan`, `bin/run-msan`,
 
 | Priority | Strategy | When |
 |----------|----------|------|
-| **1st (fallback default)** | **S1: Prior-fix + regression variant** | Default ONLY when the queue has no higher-signal card assigned. The harness queue may rank another card above every S1 patch card — follow the assigned strategy when one is given. Mines own fixes AND refactors for unfixed analogues. |
+| **1st (fallback default)** | **S1: Prior-fix + regression variant** | Default only when the queue has no higher-signal card assigned. The harness queue may rank another card above every S1 patch card — follow the assigned strategy when one is given. Mines own fixes AND refactors for unfixed analogues. |
 | **2nd** | **S2: Invariant negation** | Mechanical: break asserts, algorithm assumptions, multi-precondition gates. |
 | **3rd** | **S3: Rule-vs-implementation** | LLM-native: trace a stated security, specification, or fast/slow-path rule to the exact code that must enforce it. Security-boundary cards start with access, identity/origin, credential/assertion, outbound-request, query/template, path, injection, deserialization, or external-entity decisions. |
-| **4th** | **S4: Boundary-directed fuzzing** | The only strategy that runs a fuzzer. `bin/fuzz candidates` admits a published API that untrusted input reaches and no harness drives; `bin/fuzz template` grounds setup in at most two local callers and carries a source receipt; improve or write one faithful harness, then spend ONE bounded campaign. Artifacts replay through `bin/probe`. |
+| **4th** | **S4: Boundary-directed fuzzing** | The only strategy that runs a fuzzer. `bin/fuzz candidates` admits a published API that untrusted input reaches and no harness drives; `bin/fuzz template` grounds setup in at most two local callers and carries a source receipt; improve or write one faithful harness, then spend one bounded campaign. Artifacts replay through `bin/probe`. |
 | **5th** | **S5: Lifetime & state violation** | Re-entrancy, error-path cleanup, thread races, state machine sequences. |
 | **6th** | **S6: Cross-project variant mining** | Mine peer projects' fixes for bug classes in target. |
 | **7th** | **S7: Adversarial input** | Targeted parser/decoder boundary inputs, written by hand. A minimal public-API driver may deliver those bytes when the runner cannot; fuzz harness generation, corpora, and fuzzing are S4. |
@@ -123,7 +123,7 @@ If the current strategy yields nothing on this subsystem, **switch strategy firs
 ## REPRODUCTION
 
 ```
-0. bin/find-seed <file>[:<Function>]  — for any file/bytes/parser/decoder/regex/media surface, SEED FIRST: take the top candidates and mutate (seed+delta). From-scratch inputs bounce off format/magic/length validation and probe CLEAN without reaching the bug — the top cause of missed reachable crashes. Write from scratch only when find-seed returns nothing, or for a pure API-lifecycle / call-sequence bug with no input corpus.
+0. bin/find-seed <file>[:<Function>]  — for any file/bytes/parser/decoder/regex/media surface, seed first: take the top candidates and mutate (seed+delta). From-scratch inputs bounce off format/magic/length validation and probe CLEAN without reaching the bug — the top cause of missed reachable crashes. Write from scratch only when find-seed returns nothing, or for a pure API-lifecycle / call-sequence bug with no input corpus.
 1. WRITE testcase to the absolute `${RESULTS_DIR}/scratch-N/` dir with header
    (TARGET / HYPOTHESIS-ID / CATEGORY, plus // HARNESS: harness.c /
    harness.cc / harness.cpp for C/C++ API bugs, or another supported sibling
@@ -147,7 +147,7 @@ If the current strategy yields nothing on this subsystem, **switch strategy firs
    `report.md` skeleton, and prints `[probe] CRASH FILED: <path>`. (A single
    one-run probe does NOT auto-file — confirm first, unless it printed
    `[probe] CRASH STATE ALREADY FILED`: a confirm cannot file that either.)
-   Do NOT hunt the crashes/ tree for it and do NOT open a second dir —
+   Don't hunt the crashes/ tree for it and don't open a second dir —
    re-confirming the same testcase
    reuses the existing bundle. If it prints `[probe] CRASH DUPLICATE`, the same
    crash state (primitive + signature frames) through the same probe route is
@@ -155,8 +155,8 @@ If the current strategy yields nothing on this subsystem, **switch strategy firs
    that CRASH id and aim the next testcase at a different crash state —
    `bin/state resume` lists the promoted states already taken. A materially
    different route or build configuration is still filed. Go to the printed
-   path and ENRICH `report.md`
-   — write the narrative sections named in the "Report narrative" block of your session prompt (Summary, Root Cause, Data Flow, Impact, Fix Direction), keeping Data Flow bullets in the `step: func (path/to/file.c:NN) — desc` shape so the post-render pass can inline source snippets. Point at the fix with exactly one pointer (best-effort, never blocks filing): for a surgical 1–3 line fix, save a sibling `patch.diff` whenever it passes the non-mutating `git -C "$TARGET_ROOT" apply --check` (never modify the target source to validate — for hg targets just save the `hg diff`); do NOT write a `## Patch` section in `report.md` — `bin/enrich-report` is the single writer of that section. Otherwise — the fix is non-surgical, or you couldn't capture a clean diff — add a `## Fix Direction` heading on its own line instead. The report must also carry the standard bare-label fields `Boundary:` / `Caller controls:` / `Trusted caller actions:` / `Caller contract:` / `Trigger source:` / `Strategy:` (see `.agents/references/session-rules.md`). `Strategy: S<N>` records which of S1, S2, S3, S4, S5, S6, S7, S8, or REF produced this report — the cluster tables and ROI surface use it to attribute bugs to the strategy that found them.
+   path and enrich `report.md`
+   — write the narrative sections named in the "Report narrative" block of your session prompt (Summary, Root Cause, Data Flow, Impact, Fix Direction), keeping Data Flow bullets in the `step: func (path/to/file.c:NN) — desc` shape so the post-render pass can inline source snippets. Point at the fix with exactly one pointer (best-effort, never blocks filing): for a surgical 1–3 line fix, save a sibling `patch.diff` whenever it passes the non-mutating `git -C "$TARGET_ROOT" apply --check` (never modify the target source to validate — for hg targets just save the `hg diff`); don't write a `## Patch` section in `report.md` — `bin/enrich-report` is the single writer of that section. Otherwise — the fix is non-surgical, or you couldn't capture a clean diff — add a `## Fix Direction` heading on its own line instead. The report must also carry the standard bare-label fields `Boundary:` / `Caller controls:` / `Trusted caller actions:` / `Caller contract:` / `Trigger source:` / `Strategy:` (see `.agents/references/session-rules.md`). `Strategy: S<N>` records which of S1, S2, S3, S4, S5, S6, S7, S8, or REF produced this report — the cluster tables and ROI surface use it to attribute bugs to the strategy that found them.
 ```
 
 **Techniques:** allocator shaping, GC/CC timing, object replacement, multi-trigger, `ASAN_OPTIONS=quarantine_size_mb=1`. Full templates: `.agents/references/reproducer-templates.md`.
@@ -211,7 +211,7 @@ Before filing: `bin/scratch-search <function>` for your crash site; it covers `c
 
 ## FINDINGS (findings/FIND-*)
 
-For ANY concrete security issue in the target, regardless of whether you can produce a sanitizer reproducer or a runnable testcase. Memory safety, logic flaws, authentication or authorization bypass, injection, information disclosure, cryptographic weakness, race conditions, sandbox or privilege boundary violations all belong here. A sanitizer reproducer is NOT a precondition.
+For any concrete security issue in the target, regardless of whether you can produce a sanitizer reproducer or a runnable testcase. Memory safety, logic flaws, authentication or authorization bypass, injection, information disclosure, cryptographic weakness, race conditions, sandbox or privilege boundary violations all belong here. A sanitizer reproducer is not a precondition.
 
 Required:
 
@@ -220,7 +220,7 @@ Required:
 - The report must name a concrete location (file:function:line, endpoint, config key, etc.), state the security issue class, and give a rationale a reviewer can act on (impact, caller control, what is wrong).
 - Include the standard bare-label fields the crash gate expects, including `Strategy: S<N>` (S1, S2, S3, S4, S5, S6, S7, S8, or REF) so finding-clusters attributes the finding to the strategy that produced it.
 
-**Do NOT create FINDs for:** vague suspicions with no nameable location, "code looks suspicious" without saying why, provably unreachable code, OR pure correctness / data-integrity / robustness / spec-deviation bugs that don't cross a security boundary. "Empty input decodes to wrong bytes", "roundtrip drops whitespace", "format differs from spec" are upstream quality bugs, not security findings — record them with `bin/state add-note` and move on, don't file under `findings/`. The harness gate moves rejected FINDs to `findings-rejected/`; saving the cycles by not filing them in the first place is faster.
+**Don't create FINDs for:** vague suspicions with no nameable location, "code looks suspicious" without saying why, provably unreachable code, or pure correctness / data-integrity / robustness / spec-deviation bugs that don't cross a security boundary. "Empty input decodes to wrong bytes", "roundtrip drops whitespace", "format differs from spec" are upstream quality bugs, not security findings — record them with `bin/state add-note` and move on, don't file under `findings/`. The harness gate moves rejected FINDs to `findings-rejected/`; saving the cycles by not filing them in the first place is faster.
 
 ---
 
@@ -228,25 +228,25 @@ Required:
 
 Use `bin/state`; do not maintain a parallel Markdown journal. Key rules:
 - Fill every hypothesis field: File:Function:Line, Input Shape, Guard Gap, Expected Diagnostic
-- NEUTRAL vocabulary. "Issue in File:Function:Line" not defect class names
+- Neutral vocabulary: "Issue in File:Function:Line" not defect class names
 - Valid statuses: PENDING, INVESTIGATING, NEEDS_TESTCASE, ENV-BLOCKED, DISCARDED, CRASH-XXX, FIND-XXX
 - Max 3 NEEDS_TESTCASE, 3 ENV-BLOCKED at any time
-- Update after EVERY hypothesis closure, not at session end
+- Update after every hypothesis closure, not at session end
 - Keep at most 8 hypotheses active at a time.
 
 ---
 
 ## TOOL DISCIPLINE
 
-- **Search:** `rg -l` first, then read 2-3 files. Scope with `--glob` or narrow directory. No output directory scanning.
+- **Search:** start with `rg -l`, scoped with `--glob` or a narrow directory, then read only the relevant ranges. No output directory scanning.
 - **Shell:** chain commands with `&&`, and pipe `hg log` through `| head -N`.
 - **Process cleanup:** never kill by process name/argv: no `pkill`/`killall` (including absolute paths), and no `pgrep`/`ps`/pipeline/script feeding matched PIDs to `kill`. A target name also appears in concurrent cells' command lines. Signal only an exact PID you saved, or let the timeout wrappers and ownership reaper clean up their own trees.
 - **Timeouts:** do not call GNU `timeout`/`gtimeout`; use `python3 lib/timeout.py <seconds> TERM <rss-mb> <command> ...` or the `lib.timeout.run_timeout` API.
 - **Portability:** use Python standard-library filesystem/process APIs and the helpers in `lib/sanitizer.py` for LLVM discovery. Do not add macOS-only or GNU-only command forms directly to `bin/*` or `lib/*`.
 - **VCS:** Use `git -C <target_root>` or `hg -R <target_root>` instead of changing directories. See `.agents/references/vcs-commands.md`.
 - **Never orphan runnable testcases.** Write + run the sanitizer in the same turn. For C/C++ harnesses, the runnable testcase is the compiled sanitizer executable plus its saved output; do not leave piles of unrun source/build artifacts in scratch.
-- **Honor `PRIOR SESSION SEED`.** If the prompt lists a file with a line range you already covered, do NOT re-read that same range — work from memory, or request a different range (Claude: `offset`/`limit`; codex/shell: a different `sed -n 'A,Bp'` window). Testcases in the seed are already on disk; reuse paths instead of regenerating.
+- **Honor `PRIOR SESSION SEED`.** If the prompt lists a file with a line range you already covered, don't re-read that same range — work from memory, or request a different range (Claude: `offset`/`limit`; codex/shell: a different `sed -n 'A,Bp'` window). Testcases in the seed are already on disk; reuse paths instead of regenerating.
 
 ## AUTONOMY
 
-You are autonomous. No human in the loop. Checkpoint when context degrades.
+You are autonomous. No human in the loop.
