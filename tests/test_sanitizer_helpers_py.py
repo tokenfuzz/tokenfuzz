@@ -171,6 +171,7 @@ with tempfile.TemporaryDirectory() as directory:
         "fatal error: stack overflow",
         "fatal error: out of memory",
         "fatal error: concurrent map writes",
+        "fatal error: checkptr: converted pointer straddles multiple allocations",
         "thread 'main' panicked at sample.rs:1",
         "fatal runtime error: stack overflow",
         'Exception in thread "main" java.lang.Error',

@@ -85,6 +85,20 @@ class FindingCrashRoutingTests(unittest.TestCase):
         output.write_text("fatal error: fault\n", encoding="utf-8")
         self.assertFalse(verdict.file_has_crash(output))
 
+    def test_go_checkptr_report_is_memory_crash_evidence(self) -> None:
+        # -race enables Go's unsafe-pointer checks; a straddling conversion
+        # is an out-of-bounds view, not an ordinary runtime panic.
+        diagnostic = (
+            "fatal error: checkptr: converted pointer straddles multiple allocations\n\n"
+            "goroutine 1 gp=0x1400000 m=0 mp=0x1 [running]:\nruntime.throw()\n"
+        )
+        output = self.results / "checkptr.asan.txt"
+        output.write_text(diagnostic, encoding="utf-8")
+        self.assertTrue(verdict.file_has_crash(output))
+        self.assertTrue(triage.has_valid_diagnostic(diagnostic))
+        self.assertTrue(triage._has_memory_safety_signal(diagnostic))
+        self.assertEqual(triage.autodiscard_reason(diagnostic), "")
+
     def test_complete_memory_diagnostic_routes_to_crash_triage(self) -> None:
         directory = self.finding("FIND-001")
         (directory / "input.bin").write_bytes(b"input")

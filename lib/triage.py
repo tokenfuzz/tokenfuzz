@@ -55,7 +55,7 @@ _DIAGNOSTIC = re.compile(
     r"ERROR: (?:AddressSanitizer|HWAddressSanitizer|UndefinedBehaviorSanitizer)"
     r"|SUMMARY: (?:AddressSanitizer|HWAddressSanitizer|UndefinedBehaviorSanitizer)"
     r"|WARNING: (?:ThreadSanitizer|MemorySanitizer):|SUMMARY: (?:ThreadSanitizer|MemorySanitizer):"
-    r"|^WARNING: DATA RACE$|UndefinedBehaviorSanitizer:"
+    r"|^WARNING: DATA RACE$|UndefinedBehaviorSanitizer:|^fatal error: checkptr:"
     r"|^[^\s].*:\d+:\d+: runtime error:",
     re.MULTILINE,
 )
@@ -80,7 +80,7 @@ _OTHER_MEMORY_SAFETY = re.compile(
     r"WARNING: ThreadSanitizer: (?:data race|heap-use-after-free)"
     r"|WARNING: MemorySanitizer: use-of-uninitialized-value"
     r"|(?:ERROR|SUMMARY): HWAddressSanitizer: tag-mismatch"
-    r"|^WARNING: DATA RACE$"
+    r"|^WARNING: DATA RACE$|^fatal error: checkptr:"
     r"|SEGV on unknown address 0x0*[1-9a-fA-F][0-9a-fA-F]{3,}"
     r"|SCARINESS: \d+ \(wild-addr",
     re.MULTILINE,

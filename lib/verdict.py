@@ -26,6 +26,8 @@ CRASH_PATTERNS = (
     r"fatal error: stack overflow",
     r"fatal error: out of memory",
     r"fatal error: concurrent map",
+    # Go's unsafe-pointer instrumentation, enabled by -race.
+    r"fatal error: checkptr:",
     r"thread '.*'( \([^)]*\))? panicked at",
     r"fatal runtime error:",
     r"^Exception in thread",

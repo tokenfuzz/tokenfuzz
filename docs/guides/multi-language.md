@@ -338,6 +338,7 @@ and triage's publication decision.
 | --- | --- | --- |
 | ASan, TSan, MSan, UBSan, or another accepted sanitizer diagnostic | Sanitizer-class evidence was observed on this execution route. | Confirm with `bin/probe --confirm`. On a native sanitizer route (CLI or compiled harness) the confirmed crash is filed under `crashes/` automatically; for an interpreted sidecar harness or the `runner` route, the probe prints the `crashes/` path and the agent files it. |
 | Go `WARNING: DATA RACE` | Race-detector evidence was observed. | Same as a sanitizer diagnostic when `race` is enabled. |
+| Go `fatal error: checkptr:` | Go's `-race` pointer checks caught an unsafe conversion or arithmetic that crosses an allocation. | Same as a sanitizer diagnostic. |
 | Go `fatal error: fault` with matching non-null `unexpected fault address` and SIGSEGV/SIGBUS lines | A native memory fault was observed even without a race warning. | Confirm on the same route. A near-null address is excluded as a null dereference; source review still decides reachability and security impact. |
 | A registered traceback, panic, exception, or fatal-error banner with `[sanitizer] enabled = []` | The runner produced a diagnostic worth investigating. | Trace it to source. The agent authors `findings/FIND-*` only for a concrete issue that crosses a security boundary. |
 | No recognized diagnostic | Nothing to file. | Read the probe verdict (`CLEAN`, `NO_EXEC`, `EXEC_FAIL`) and its coverage column, then revise the testcase. |
