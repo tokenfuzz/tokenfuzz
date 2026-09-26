@@ -579,21 +579,24 @@ def _signature(crash_dir: Path) -> dict:
     sev_level, sev_rank, sev_score = _extract_severity(report_text)
     status = "OK"
     missing = promotion_pending_reasons(crash_dir)
+    # One current-receipt read per row: each read rehashes the evidence.
+    receipt = validation_receipt.read_current(crash_dir)
+    receipt_state = str((receipt or {}).get("state", ""))
     if missing:
         status = f"PENDING (missing: {','.join(missing)})"
-    elif validation_receipt.claims_no_security_credit(crash_dir):
+    elif receipt_state in validation_receipt.FINAL_STATES - validation_receipt.SECURITY_STATES:
         # The index agents read before filing said OK about crashes the scorer
         # had already written off, so a whole seam looked productive while it
         # earned nothing. Name the state instead: same bundle, same evidence,
         # no security credit.
         status = "NOT-REPORTABLE (no security credit)"
-    elif validation_receipt.read_current(crash_dir) is None and (
+    elif receipt is None and (
         validation_receipt.claims_state(crash_dir, validation_receipt.FINAL_STATES)
     ):
         # A concluded review whose report or scope changed underneath it is
         # not OK either; bin/severity names the same case stale.
         status = "STALE (validation no longer matches)"
-    elif (validation_receipt.read_current(crash_dir) or {}).get("state") != "reportable":
+    elif receipt_state != "reportable":
         # Complete but not yet judged, or cut off by the wall: only a current
         # reportable receipt publishes a crash.
         status = "PENDING REVIEW"

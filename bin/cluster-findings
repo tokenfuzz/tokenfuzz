@@ -187,11 +187,14 @@ def _signature(find_dir: Path, target_root: str) -> dict:
     # been scored yet (carries no Severity line), which would otherwise show
     # as Pending. Mirrors how bin/cluster-crashes already sources severity.
     report_level, _report_rank, report_score = finding_signature.extract_severity(text)
-    no_security_credit = validation_receipt.claims_no_security_credit(find_dir)
+    # One current-receipt read per row: each read rehashes the evidence.
+    receipt_state = str((validation_receipt.read_current(find_dir) or {}).get("state", ""))
+    no_security_credit = receipt_state in (
+        validation_receipt.FINAL_STATES - validation_receipt.SECURITY_STATES
+    )
     pinned = (find_dir / ".reviewed").is_file() or (find_dir / ".keep").is_file()
     # Only a current reportable receipt publishes a finding. A filed or
     # wall-cut one still showed OK with the severity of an earlier draft.
-    receipt_state = str((validation_receipt.read_current(find_dir) or {}).get("state", ""))
     unjudged = not pinned and not no_security_credit and receipt_state != "reportable"
     if no_security_credit:
         sev = ""
