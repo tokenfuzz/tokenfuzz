@@ -27,7 +27,7 @@ sys.path.insert(0, str(LIB_DIR))
 
 import sanitizer
 from file_tools import cap_output_file, capture_command
-from verdict import CRASH_PATTERNS, file_declares_no_exec
+from verdict import file_declares_no_exec, file_has_crash
 
 VALID_SANITIZERS = {"asan", "ubsan", "msan", "tsan", "race", "runner"}
 RUNNERS = {
@@ -38,7 +38,6 @@ OPTION_NAMES = {
     "asan": "ASAN_OPTIONS", "ubsan": "UBSAN_OPTIONS",
     "msan": "MSAN_OPTIONS", "tsan": "TSAN_OPTIONS",
 }
-CRASH_RE = re.compile("|".join(CRASH_PATTERNS), re.MULTILINE)
 EXEC_VERIFIED_RE = re.compile(
     r"^\[run-(?:asan|ubsan|msan|tsan)\] "
     r"(?:browser|js|xpcshell|generic) EXECUTION VERIFIED \(post-run|"
@@ -374,7 +373,7 @@ class MultiRun:
         return allowed > 0
 
     def classify(self, path: Path, returncode: int) -> Outcome:
-        crashed = _file_matches(path, CRASH_RE)
+        crashed = file_has_crash(path)
         succeeded = _file_matches(path, EXEC_VERIFIED_RE)
         # A language testcase can prove that an optional target component is
         # absent before the shared transport reports its nonzero exit. The

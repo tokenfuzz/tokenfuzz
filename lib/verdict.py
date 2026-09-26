@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import deque
 import re
 from pathlib import Path
 from urllib.parse import unquote
@@ -114,6 +115,30 @@ _EXECUTION_ATTEMPTED_RE = re.compile(
 _POSTRUN_RC_RE = re.compile(
     r"EXECUTION (?:INCONCLUSIVE|VERIFIED) \(post-run, rc=(-?[0-9]+)\)"
 )
+_GO_FATAL_FAULT_RE = re.compile(
+    r"^unexpected fault address 0x([0-9a-fA-F]+)[ \t\r]*\n"
+    r"^fatal error: fault[ \t\r]*\n"
+    r"^\[signal SIG(?:SEGV|BUS):[^\n]*\baddr=0x([0-9a-fA-F]+)\b",
+    re.MULTILINE,
+)
+
+
+def go_fatal_fault_address(text: str) -> int | None:
+    """Return the strongest corroborated Go fault across confirmation runs."""
+    found = None
+    for match in _GO_FATAL_FAULT_RE.finditer(text):
+        address = int(match.group(1), 16)
+        if address == int(match.group(2), 16):
+            found = max(found, address) if found is not None else address
+    return found
+
+
+def go_memory_fault(text: str) -> bool:
+    """Whether a corroborated Go fault lies past the null page, which, like
+    ASan's zero-page hint, marks a null dereference rather than memory
+    corruption."""
+    address = go_fatal_fault_address(text)
+    return address is not None and address >= 0x1000
 
 
 def _file_matches(path: str | Path, pattern: re.Pattern) -> bool:
@@ -125,9 +150,19 @@ def _file_matches(path: str | Path, pattern: re.Pattern) -> bool:
 
 
 def file_has_crash(path: str | Path, extra_patterns: tuple[str, ...] = ()) -> bool:
-    if extra_patterns:
-        pattern = re.compile("|".join((*CRASH_PATTERNS, *extra_patterns)))
-        return _file_matches(path, pattern)
+    pattern = (
+        re.compile("|".join((*CRASH_PATTERNS, *extra_patterns)))
+        if extra_patterns else _CRASH_RE
+    )
+    recent: deque[str] = deque(maxlen=3)
+
+    def crashed(line: str, static: bool) -> bool:
+        if static and pattern.search(line + "\n"):
+            return True
+        # A Go fault report spans three lines and ends at its signal line.
+        recent.append(line + "\n")
+        return line.startswith("[signal SIG") and go_memory_fault("".join(recent))
+
     try:
         pending = ""
         with Path(path).open(encoding="utf-8", errors="replace") as stream:
@@ -137,25 +172,21 @@ def file_has_crash(path: str | Path, extra_patterns: tuple[str, ...] = ()) -> bo
                 if newline < 0:
                     pending = text
                     continue
-                complete = text[:newline + 1]
-                pending = text[newline + 1:]
-                if not any(hint in complete for hint in _CRASH_HINTS):
-                    continue
-                for line in complete.split("\n")[:-1]:
-                    if _CRASH_RE.search(line + "\n"):
-                        return True
-            return bool(
-                pending
-                and any(hint in pending for hint in _CRASH_HINTS)
-                and _CRASH_RE.search(pending)
-            )
+                complete, pending = text[:newline + 1], text[newline + 1:]
+                static = bool(extra_patterns) or any(hint in complete for hint in _CRASH_HINTS)
+                if any(crashed(line, static) for line in complete.split("\n")[:-1]):
+                    return True
+        static = bool(extra_patterns) or any(hint in pending for hint in _CRASH_HINTS)
+        return bool(pending) and crashed(pending, static)
     except OSError:
         return False
 
 
 def text_has_crash(text: str) -> bool:
     """Whether captured output carries a sanitizer or runtime diagnostic."""
-    return any(_CRASH_RE.search(line) for line in text.splitlines())
+    return go_memory_fault(text) or any(
+        _CRASH_RE.search(line) for line in text.splitlines()
+    )
 
 
 #: A testcase or harness declaring that nothing executed: a managed

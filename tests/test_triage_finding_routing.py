@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "lib"))
 
 import triage  # noqa: E402
+import verdict  # noqa: E402
 import validation_receipt  # noqa: E402
 
 
@@ -53,6 +54,36 @@ class FindingCrashRoutingTests(unittest.TestCase):
         self.assertFalse(triage.has_valid_diagnostic(
             diagnostic, findings_only=False,
         ))
+
+    def test_go_nonnull_fatal_fault_is_memory_crash_evidence(self) -> None:
+        diagnostic = (
+            "unexpected fault address 0x110390000\n"
+            "fatal error: fault\n"
+            "[signal SIGSEGV: segmentation violation code=0x2 "
+            "addr=0x110390000 pc=0x102ccf8b4]\n"
+            "runtime.memmove()\n"
+        )
+        output = self.results / "go-fault.asan.txt"
+        output.write_text(diagnostic, encoding="utf-8")
+        self.assertTrue(verdict.file_has_crash(output))
+        self.assertTrue(verdict.text_has_crash(diagnostic.replace("\n", "\r\n")))
+        self.assertTrue(triage.has_valid_diagnostic(diagnostic))
+        self.assertTrue(triage._has_memory_safety_signal(diagnostic))
+        self.assertEqual(triage.autodiscard_reason(diagnostic), "")
+        low_fault = diagnostic.replace("0x110390000", "0x0")
+        self.assertTrue(triage.has_valid_diagnostic(low_fault))
+        self.assertEqual(triage.autodiscard_reason(low_fault), "null-deref")
+        self.assertEqual(
+            triage.autodiscard_reason("WARNING: DATA RACE\n" + low_fault), "",
+            "a null fault in one confirmation run must not hide a race in another",
+        )
+        mixed_faults = low_fault + diagnostic
+        self.assertTrue(verdict.text_has_crash(mixed_faults))
+        self.assertEqual(triage.autodiscard_reason(mixed_faults), "")
+        output.write_text(low_fault, encoding="utf-8")
+        self.assertFalse(verdict.file_has_crash(output))
+        output.write_text("fatal error: fault\n", encoding="utf-8")
+        self.assertFalse(verdict.file_has_crash(output))
 
     def test_complete_memory_diagnostic_routes_to_crash_triage(self) -> None:
         directory = self.finding("FIND-001")

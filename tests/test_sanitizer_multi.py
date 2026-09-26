@@ -161,6 +161,17 @@ else:
         self.assertIn("EXECUTION_RATE: 0/1", output)
         self.assertIn("testcase may not have executed", output)
 
+    def test_go_nonnull_fatal_fault_counts_without_race_warning(self) -> None:
+        self.write_runner(
+            "print('unexpected fault address 0x110390000')\n"
+            "print('fatal error: fault')\n"
+            "print('[signal SIGSEGV: segmentation violation code=0x2 addr=0x110390000 pc=0x1234]')\n"
+            "raise SystemExit(2)\n"
+        )
+        result = self.run_multi("generic", sanitizer="race")
+        self.assertIn("CRASH_RATE: 1/1", self.output(result))
+        self.assertIn("CRASHES FOUND: 1/1", self.output(result))
+
     def test_a_symbolizer_timeout_is_paid_once_per_invocation(self) -> None:
         # A very large library timed out the symbolizer on every run of a
         # five-run confirm; the later runs keep raw frames instead.

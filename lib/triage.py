@@ -32,6 +32,7 @@ import stack_frames
 import target_config
 import triage_validate
 import validation_receipt
+import verdict
 import workqueue
 from prompt_render import render_template
 
@@ -178,7 +179,7 @@ def has_valid_diagnostic(text: str, findings_only: bool = False) -> bool:
     target has no instrumented build, so a language-runtime diagnostic (Go panic,
     Python traceback, JVM exception, ...) is the strongest proof available and
     stands in for one."""
-    if _DIAGNOSTIC.search(text):
+    if _DIAGNOSTIC.search(text) or verdict.go_fatal_fault_address(text) is not None:
         return True
     return findings_only and bool(_RUNTIME_DIAGNOSTIC.search(text))
 
@@ -195,9 +196,12 @@ def autodiscard_reason(text: str) -> str:
     if (
         stack_frames.memory_safety_class(text)
         or _OTHER_MEMORY_SAFETY.search(text)
+        or verdict.go_memory_fault(text)
         or _ubsan_class(text) == "security"
     ):
         return ""
+    if verdict.go_fatal_fault_address(text) is not None:
+        return "null-deref"
     if _DEBUG_ASSERT.search(text) and _ABORT_SIGNAL.search(text):
         return "debug assertion abort"
     for pattern, reason in _AUTO_REJECT:
@@ -2192,6 +2196,7 @@ def _has_memory_safety_signal(text: str) -> bool:
     return bool(
         stack_frames.memory_safety_class(text)
         or _OTHER_MEMORY_SAFETY.search(text)
+        or verdict.go_memory_fault(text)
         or _ubsan_class(text) == "security"
     )
 
