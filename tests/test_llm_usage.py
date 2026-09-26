@@ -743,6 +743,18 @@ class ServedModelTests(unittest.TestCase):
         )
         self.assertNotIn("served_model", healthy)
 
+    def test_a_default_model_call_is_recorded_under_that_model(self) -> None:
+        # Standalone gate runs pass no --model; the CLI still ran its default,
+        # and a row naming no model cannot be priced.
+        index = self.root / "index.jsonl"
+        llm_usage.append_usage_event(
+            index, backend="codex", model="", kind="decision:trigger-validator",
+            prompt_text="p", raw_text="",
+        )
+        row = json.loads(index.read_text(encoding="utf-8").splitlines()[-1])
+        self.assertEqual(row["model"], llm_usage.llm_invoke.default_model("codex"))
+        self.assertTrue(row["model"])
+
     def test_a_cli_reporting_no_served_model_falls_open(self) -> None:
         # Absence of telemetry is not evidence of substitution; oss reports
         # none, and refusing every oss run would be a worse failure.

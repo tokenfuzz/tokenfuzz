@@ -126,6 +126,18 @@ def index_log(runtime: "Runtime", message: str) -> None:
     _append(runtime.index, log(message))
 
 
+def log_lane_stop(runtime: "Runtime", outcome: str, reason: str) -> None:
+    """Keep a fixed-lane skip distinguishable from completed audit work."""
+    label = "LANE_UNAVAILABLE" if outcome == "unavailable" else "LANE_EXHAUSTED"
+    index_log(runtime, f"{label}: {reason}")
+    workqueue.append_jsonl(
+        Path(runtime.results) / "state" / "events.jsonl",
+        {"type": "lane_stop", "outcome": outcome,
+         "strategy": str(runtime.fixed_strategy).upper(), "reason": reason,
+         "recorded": datetime.now(timezone.utc).isoformat()},
+    )
+
+
 def _nonnegative(value: str) -> int:
     try:
         parsed = int(value)
@@ -620,12 +632,22 @@ def validate_model(runtime: Runtime, audit_guide: str = "") -> None:
                 cwd=runtime.root,
                 agent_security=runtime.agent_security,
             )
-            llm_usage.append_usage_event(
-                getattr(runtime, "index_jsonl", runtime.logs / "index.jsonl"),
-                backend=runtime.backend, model=runtime.model,
-                kind="model-preflight", prompt_text=prompt_text, raw_path=raw,
-                usage_complete=last_rc == 0,
-            )
+            rejected = False
+            if last_rc != 0 and raw.is_file():
+                with raw.open(encoding="utf-8", errors="replace") as transcript_lines:
+                    rejected = (
+                        audit_helpers._provider_issue_from_lines(transcript_lines)
+                        == "backend_rejected"
+                    )
+            if not rejected:
+                # A refused request was never served; an estimated row for it
+                # would price tokens no provider consumed.
+                llm_usage.append_usage_event(
+                    getattr(runtime, "index_jsonl", runtime.logs / "index.jsonl"),
+                    backend=runtime.backend, model=runtime.model,
+                    kind="model-preflight", prompt_text=prompt_text, raw_path=raw,
+                    usage_complete=last_rc == 0,
+                )
             try:
                 acted = sentinel.read_text(encoding="utf-8").strip() == token
             except OSError:
@@ -695,10 +717,22 @@ def validate_model(runtime: Runtime, audit_guide: str = "") -> None:
                         f"Codex CLI; retrying with existing PATH candidate {replacement}",
                     )
                     continue
+            if rejected:
+                # A provider refusal (including 401) needs changed credentials
+                # or model access; identical timed retries only consume the
+                # strategy wall across every target.
+                (runtime.logs / ".backend-unavailable").touch()
+                (runtime.logs / ".run-quality").write_text(
+                    "provider_limited\n", encoding="utf-8",
+                )
+                raise RuntimeError(
+                    f"model preflight: provider rejected backend={runtime.backend} "
+                    f"model={runtime.model} on attempt {attempt}; check CLI "
+                    f"credentials and model access. Transcript: {raw}"
+                )
             if attempt < attempts:
-                # Provider startup and authentication failures benefit from a
-                # short retry delay, but this is harness policy rather than an
-                # operator tuning surface.
+                # Transient startup failures get a short retry delay. A
+                # provider refusal exits above instead of retrying unchanged.
                 time.sleep(min(15 * (4 ** (attempt - 1)), 60))
     finally:
         if agy_log is not None:
@@ -1750,14 +1784,12 @@ _TOKEN_DISPLAY_BUCKETS = (
 )
 
 
-def _token_display(usage: dict, complete: bool) -> str:
-    """Render a session's token use as its separate buckets.
+def _token_display(usage: dict, complete: bool, *, backend: str = "") -> str:
+    """Render a session's token use without hiding cache overlap.
 
-    Never one sum. Fresh input, cache writes, cache reads, and output are
-    different operations at different prices, and a single figure reads as
-    generated content when it is mostly replayed context — which is how a
-    context-replay cost was once diagnosed as a prompt-size problem. The same
-    shape bin/benchmark prints per cell.
+    Codex, Gemini, and Grok include cache reads in `input`; `uncached` makes
+    that overlap visible without changing the measured counters. The same
+    counters feed bin/benchmark's per-cell pricing.
     """
     counts = usage.get("tokens") or {}
     buckets = {label: int(counts.get(key) or 0) for label, key in _TOKEN_DISPLAY_BUCKETS}
@@ -1765,7 +1797,13 @@ def _token_display(usage: dict, complete: bool) -> str:
         # Nothing measured and nothing estimated: say so rather than print
         # four zeroes that read as a session which used no tokens.
         return "unknown" if not complete else "0"
-    rendered = " ".join(f"{label}:{value}" for label, value in buckets.items())
+    parts = []
+    for label, value in buckets.items():
+        parts.append(f"{label}:{value}")
+        if label == "cache" and backend in llm_usage.INPUT_INCLUDES_CACHED:
+            fresh = buckets["in"] - value
+            parts.append(f"uncached:{fresh if fresh >= 0 else 'unknown'}")
+    rendered = " ".join(parts)
     estimated = usage.get("estimated") is True or not complete
     return f"{rendered} (estimated)" if estimated else rendered
 
@@ -1924,7 +1962,7 @@ def run_agent(
         if rc == 124 and issue == "none"
         else f"finished rc={rc}"
     )
-    token_display = _token_display(usage, usage_complete)
+    token_display = _token_display(usage, usage_complete, backend=runtime.backend)
     first_probe = probe_stats.get("first_probe_seconds")
     index_log(
         runtime,
@@ -4454,11 +4492,11 @@ def run_iteration(state: BackendState) -> tuple[str, list[AgentResult]]:
     if lane_exhausted:
         unavailable = _fixed_lane_unavailable(runtime)
         if unavailable:
-            index_log(runtime, f"LANE_UNAVAILABLE: {unavailable}")
+            log_lane_stop(runtime, "unavailable", unavailable)
         else:
-            index_log(
-                runtime,
-                "LANE_EXHAUSTED: no open "
+            log_lane_stop(
+                runtime, "exhausted",
+                "no open "
                 f"{str(runtime.fixed_strategy).upper()} card or hypothesis remains",
             )
         state.stopped = True
@@ -4628,7 +4666,7 @@ def run_backend(runtime: Runtime, args, guide: str) -> int:
         unavailable = _fixed_lane_unavailable(runtime)
         if unavailable:
             refresh_work_cards(runtime, force=True)
-            index_log(runtime, f"LANE_UNAVAILABLE: {unavailable}")
+            log_lane_stop(runtime, "unavailable", unavailable)
             return 0
         runner_preflight.validate(
             runtime.config, lambda message: index_log(runtime, message)
@@ -4800,7 +4838,7 @@ def run_ensemble(runtimes: list[Runtime], args, guide: str) -> int:
         if unavailable:
             for runtime in runtimes:
                 refresh_work_cards(runtime, force=True)
-                index_log(runtime, f"LANE_UNAVAILABLE: {unavailable}")
+                log_lane_stop(runtime, "unavailable", unavailable)
             return 0
         runner_preflight.validate(
             runtimes[0].config,

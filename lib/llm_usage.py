@@ -74,6 +74,14 @@ from pathlib import Path
 import llm_invoke
 
 _INPUT_KEYS = ("input_tokens", "prompt_tokens", "input")
+# Codex reports total input (cached + fresh); gemini-cli's
+# `result.stats.input_tokens` is likewise cumulative even though it has a
+# separate fresh-only `input` field. Grok Build follows the total-input API
+# convention. Claude reports fresh input only; OpenCode/oss is out by
+# arithmetic, since its `tokens.total` sums input and cache buckets, so its
+# `input` is already disjoint from them. Pricing and operator logs subtract
+# the cached subset only for the inclusive backends.
+INPUT_INCLUDES_CACHED = frozenset({"codex", "gemini", "grok"})
 # gemini-cli's result.stats names its cache-read counter `cached` (no
 # `_input` / `_tokens` suffix); without this alias the 55M+ tokens it bills
 # as cache reads are silently dropped from the cached_input column.
@@ -1187,6 +1195,9 @@ def append_usage_event(
         estimate_missing=True,
     )
     usage_complete = bool(usage_complete and usage_is_complete(usage, 0))
+    # A caller that left the model to the backend default still ran one; an
+    # empty name leaves the row unpriceable.
+    model = llm_invoke.resolve_model_name(backend, model)
     annotate_served_model(usage, raw_text, model)
     if not index_path:
         return usage

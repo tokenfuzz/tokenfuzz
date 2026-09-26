@@ -560,9 +560,12 @@ class RunnerPreflightTests(unittest.TestCase):
 
     def test_unsupported_s4_stops_before_any_preflight(self):
         events = []
+        temporary = tempfile.TemporaryDirectory(prefix="unsupported-s4-")
+        self.addCleanup(temporary.cleanup)
         runtime = SimpleNamespace(
             config=self.config(Path("/target"), "python3"),
             fixed_strategy="S4",
+            results=Path(temporary.name),
         )
         args = SimpleNamespace(allow_concurrent=False, max_iterations=0)
         with mock.patch.object(
@@ -585,6 +588,9 @@ class RunnerPreflightTests(unittest.TestCase):
 
         self.assertEqual(result, 0)
         self.assertEqual(events, ["queue", "unavailable"])
+        lane_events = audit_runner.workqueue.read_jsonl(
+            runtime.results / "state/events.jsonl")
+        self.assertEqual(lane_events[0]["outcome"], "unavailable")
 
 
 class TestcaseDependenceTests(unittest.TestCase):

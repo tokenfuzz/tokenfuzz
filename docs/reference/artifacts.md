@@ -135,6 +135,12 @@ card; `bin/state coverage` reads it. See
 `queue_size`, `score`, and `strategy` the card carried when it was offered,
 which is what `bin/state card-yield` replays.
 
+`state/events.jsonl` records `lane_stop` rows for a pinned strategy that has
+no applicable work (`outcome: unavailable`) or has exhausted its available
+cards (`outcome: exhausted`), with the strategy and reason. An unavailable
+lane can exit successfully without running an audit session; count that row
+as a skipped lane, not a completed strategy window.
+
 `state/runs.jsonl` has one row per `bin/probe` invocation: verdict,
 sanitizer, duration, and, when a coverage replay ran, `coverage` (`HIT`,
 `MISSED`, `UNAVAILABLE`, and so on) with the `closest` frame it reached. Its

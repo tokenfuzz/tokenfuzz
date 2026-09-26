@@ -1630,6 +1630,50 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         "preflight never passes on a sentinel an earlier attempt left behind",
     )
 
+    # A rejected credential cannot recover on a timed retry. During a live
+    # campaign three preflight attempts spent minutes per target before each
+    # lane failed; preserve the raw transcript but stop after the first 401.
+    model_runtime.backend = "codex"
+    model_runtime.model = "gpt-6-sol"
+    auth_attempts = []
+
+    def _rejected_auth(_backend, _prompt, _timeout, raw_log, **_kwargs):
+        auth_attempts.append(None)
+        Path(raw_log).write_text(
+            '{"type":"error","message":"unexpected status 401 Unauthorized: '
+            'Incorrect API key provided"}\n', encoding="utf-8",
+        )
+        return 1
+
+    preflight_index = model_runtime.logs / "index.jsonl"
+
+    def _usage_rows() -> int:
+        try:
+            return len(preflight_index.read_text(encoding="utf-8").splitlines())
+        except OSError:
+            return 0
+
+    rows_before = _usage_rows()
+    with mock.patch.dict(
+        os.environ, {"AUDIT_MODEL_PREFLIGHT_ATTEMPTS": "3"}, clear=False,
+    ), mock.patch.object(
+        audit_runner.llm_invoke, "run_agent_prompt", side_effect=_rejected_auth,
+    ), mock.patch.object(audit_runner.time, "sleep") as auth_sleep:
+        try:
+            audit_runner.validate_model(model_runtime)
+            rejected_auth_message = ""
+        except RuntimeError as exc:
+            rejected_auth_message = str(exc)
+    check(
+        len(auth_attempts) == 1 and not auth_sleep.called
+        and "provider rejected" in rejected_auth_message,
+        "model preflight stops immediately on a provider authorization rejection",
+    )
+    check(
+        _usage_rows() == rows_before,
+        "a refused preflight records no estimated usage the provider never served",
+    )
+
     # The per-session tally is telemetry, not a verdict: it is how a run that
     # could not act is diagnosed afterwards. A tool count cannot tell a blocked
     # agent from one that read its state and concluded, and a session denied

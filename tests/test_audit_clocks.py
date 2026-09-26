@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sys
@@ -35,6 +36,26 @@ class AuditClockTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
+
+    def test_unavailable_fixed_lane_records_a_structured_outcome(self) -> None:
+        results = self.root / "results"
+        runtime = SimpleNamespace(
+            results=results, index=self.runtime.index, fixed_strategy="S4",
+        )
+        args = SimpleNamespace(allow_concurrent=False)
+        with (mock.patch.object(audit_runner, "instance_lock",
+                                return_value=contextlib.nullcontext()),
+              mock.patch.object(audit_runner, "_fixed_lane_unavailable",
+                                return_value="native sanitizer library unavailable"),
+              mock.patch.object(audit_runner, "refresh_work_cards")):
+            self.assertEqual(audit_runner.run_backend(runtime, args, ""), 0)
+        events = audit_runner.workqueue.read_jsonl(
+            results / "state" / "events.jsonl")
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["type"], "lane_stop")
+        self.assertEqual(events[0]["outcome"], "unavailable")
+        self.assertEqual(events[0]["strategy"], "S4")
+        self.assertIn("native sanitizer library", events[0]["reason"])
 
     def test_productive_budget_includes_housekeeping(self) -> None:
         state = audit_runner.BackendState(
@@ -498,6 +519,21 @@ class AuditClockTests(unittest.TestCase):
             ).endswith("(estimated)")
         )
         self.assertEqual(audit_runner._token_display({}, False), "unknown")
+
+    def test_codex_session_log_shows_uncached_input(self) -> None:
+        self.assertEqual(
+            audit_runner._token_display(
+                {"tokens": {
+                    "input": 4_049_112,
+                    "cached_input": 3_960_960,
+                    "cache_creation": 0,
+                    "output": 19_379,
+                }},
+                True,
+                backend="codex",
+            ),
+            "in:4049112 cache:3960960 uncached:88152 create:0 out:19379",
+        )
 
 
 if __name__ == "__main__":

@@ -1371,23 +1371,6 @@ def confirmed_finding_class_count(findings_dir: Path, names: list[str]) -> int:
     return len(confirmed_finding_class_histogram(findings_dir, names))
 
 
-# Backends whose `input` token field already includes the cached prefix
-# (cached + fresh). Codex reports a running total; gemini-cli's
-# `result.stats.input_tokens` is likewise cumulative (it
-# also emits a separate fresh-only `input`, but the priority order in
-# _INPUT_KEYS picks `input_tokens` first, so the same subtract-cached
-# normalization applies). The xAI Responses API uses the same total-input
-# convention if Grok Build exposes usage in a future CLI release. Claude
-# and OpenCode/oss report fresh input only and stay out
-# of this list. harvest_tokens subtracts the cached part for these so
-# the per-turn delta is comparable across backends. Backend names are
-# industry vocabulary, not target-specific, so this list is
-# harness-shared by design.
-# OpenCode is out by arithmetic: its per-request `tokens.total` equals
-# input + output + reasoning + cache.read + cache.write, so `input` is
-# disjoint from the cache buckets and subtracting floored oss cells at zero.
-_INPUT_INCLUDES_CACHED = ("codex", "gemini", "grok")
-
 _MILLION = Decimal("1000000")
 
 
@@ -2250,7 +2233,7 @@ def harvest_tokens(
         cache_creation_1h = min(
             cache_creation, _int(tok.get("cache_creation_1h"))
         )
-        if backend in _INPUT_INCLUDES_CACHED:
+        if backend in llm_usage.INPUT_INCLUDES_CACHED:
             full_rate_input = max(0, raw_input - cache_read)
         else:
             # Claude's `input` excludes both cache hits AND cache writes;
