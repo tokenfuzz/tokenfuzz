@@ -708,8 +708,10 @@ class ReplayOptionTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as raw:
             config = SimpleNamespace(
-                runner_env=[], sanitizer_options={"asan": "detect_container_overflow=0"},
+                runner_env=["ASAN_OPTIONS=verbosity=1"],
+                sanitizer_options={"asan": "detect_container_overflow=0"},
                 sanitizer_suppressions_path=lambda _name: "",
+                target_root=raw, results_dir=raw, slug="sampleproj",
             )
             stub = SimpleNamespace(
                 args=SimpleNamespace(mode="generic", timeout=5), config=config,
@@ -723,6 +725,7 @@ class ReplayOptionTests(unittest.TestCase):
                 module.Hits.run_target(stub, Path(raw))
             options = seen["ASAN_OPTIONS"]
             self.assertIn("detect_container_overflow=0", options)
+            self.assertIn("verbosity=1", options, "a [runner].env entry layers, not replaces")
             self.assertTrue(
                 options.endswith(f"coverage=1:coverage_dir={raw}"),
                 "coverage keys stay last so nothing earlier disables them",

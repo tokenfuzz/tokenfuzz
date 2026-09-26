@@ -97,10 +97,6 @@ def runtime_env(
     testcase: str = "",
 ) -> dict[str, str]:
     environment = sanitizer.prepare_runtime_env(selected, BASE_ENV)
-    if selected == "asan":
-        environment["ASAN_OPTIONS"] = sanitizer.runtime_options(
-            "asan", option_string, BASE_ENV
-        )
     if CONFIG:
         for entry in CONFIG.runner_env:
             entry = sanitizer_run.expand_runner_value(
@@ -109,6 +105,12 @@ def runtime_env(
             )
             key, value = entry.split("=", 1)
             environment[key] = value
+    if selected == "asan":
+        # After [runner].env, so an ASAN_OPTIONS entry there layers over the
+        # harness options instead of replacing them.
+        environment["ASAN_OPTIONS"] = sanitizer.runtime_options(
+            "asan", option_string, environment
+        )
     return environment
 
 

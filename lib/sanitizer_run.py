@@ -229,9 +229,6 @@ class SanitizerRunner:
         testcase: str = "",
     ) -> dict[str, str]:
         result = dict(self.env)
-        result[f"{self.upper}_OPTIONS"] = sanitizer.runtime_options(
-            self.name, options, self.env, final_options
-        )
         if self.config:
             for entry in self.config.runner_env:
                 expanded = expand_runner_value(
@@ -240,6 +237,11 @@ class SanitizerRunner:
                 )
                 key, value = expanded.split("=", 1)
                 result[key] = value
+        # Composed after [runner].env, which may itself set these options:
+        # applied last, it replaced the harness base and final options.
+        result[f"{self.upper}_OPTIONS"] = sanitizer.runtime_options(
+            self.name, options, result, final_options
+        )
         return result
 
     def generic(self, options: str, timeout: int, args: Sequence[str]) -> int:

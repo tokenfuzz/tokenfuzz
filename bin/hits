@@ -491,10 +491,18 @@ class Hits:
 
     def run_target(self, coverage_dir: Path) -> tuple[Path, int | None]:
         environment = sanitizer.prepare_runtime_env("asan")
+        if self.args.mode == "generic" and self.config:
+            for entry in self.config.runner_env:
+                expanded = sanitizer_run.expand_runner_value(
+                    entry, self.config, "asan", testcase=str(self.testcase),
+                )
+                key, value = expanded.split("=", 1)
+                environment[key] = value
         # The replay must start the way the probe did: a target's configured
         # options can suppress a startup defect, and dropping them aborted
-        # every replay before it read the input. Coverage keys go last so no
-        # configured or ambient option can switch them off.
+        # every replay before it read the input. Composed after [runner].env,
+        # with the coverage keys last so no configured or ambient option can
+        # switch them off.
         environment["ASAN_OPTIONS"] = sanitizer.runtime_options(
             "asan",
             sanitizer.compose_options("asan", "detect_leaks=0:halt_on_error=0", self.config),
@@ -503,13 +511,6 @@ class Hits:
         )
         output = coverage_dir / "target-output.raw"
         if self.args.mode == "generic":
-            if self.config:
-                for entry in self.config.runner_env:
-                    expanded = sanitizer_run.expand_runner_value(
-                        entry, self.config, "asan", testcase=str(self.testcase),
-                    )
-                    key, value = expanded.split("=", 1)
-                    environment[key] = value
             with output.open("wb") as stream:
                 completed = run_timeout(
                     [str(self.generic_binary), *self._generic_command_args()],
