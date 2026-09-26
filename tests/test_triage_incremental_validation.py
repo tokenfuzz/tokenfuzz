@@ -3242,6 +3242,32 @@ Generated score text.
         self.assertIsNotNone(receipt)
         self.assertEqual(receipt["state"], "rejected")
 
+    def test_a_gate_run_outside_the_audit_uses_the_pinned_threat_model(self) -> None:
+        # Post-wall gates ran without the audit's environment and judged every
+        # trigger against `bytes`, rejecting a race the target's pinned
+        # controls include.
+        config = self.root / ".target.toml"
+        config.write_text(
+            'target = "sampleproj"\n[threat_model]\nattacker_controls = ["bytes", "race"]\n',
+            encoding="utf-8",
+        )
+        (self.root / ".session-env").write_text(
+            f"RESULTS_DIR={self.root}\nTARGET_SLUG=sampleproj\n"
+            f"TARGET_CONFIG_SHA256={hashlib.sha256(config.read_bytes()).hexdigest()}\n",
+            encoding="utf-8",
+        )
+        seen = []
+        gate = triage._in_pinned_session(
+            lambda _results: seen.append(triage_validate.trigger_attacker_controls())
+        )
+        with mock.patch.dict(os.environ, {"TARGET_ATTACKER_CONTROLS_CSV": ""}):
+            gate(self.root)
+            self.assertEqual(os.environ["TARGET_ATTACKER_CONTROLS_CSV"], "")
+        self.assertEqual(seen, [["bytes", "race"]])
+        with mock.patch.dict(os.environ, {"TARGET_ATTACKER_CONTROLS_CSV": "bytes"}):
+            gate(self.root)
+        self.assertEqual(seen[-1], ["bytes"], "an explicit caller setting still wins")
+
     def test_publication_rejection_is_requeued_only_when_its_review_is_stale(self) -> None:
         rejected = self.root / "findings-rejected"
         rejected.mkdir()

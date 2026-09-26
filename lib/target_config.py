@@ -583,6 +583,26 @@ def find_session_dir(start: str | os.PathLike) -> Optional[Path]:
         cur = cur.parent
 
 
+def pinned_session_environment(results_dir: str | os.PathLike) -> dict[str, str]:
+    """The session variables and attacker controls a results tree pinned.
+
+    Reads only `results_dir/.session-env` and its digest-checked config, never
+    a neighbouring tree: a gate run outside the audit must judge with the
+    threat model this tree was audited under. A tree with no session returns
+    nothing; a tampered pin raises PinnedConfigError.
+    """
+    try:
+        session = read_session_env(results_dir)
+    except FileNotFoundError:
+        return {}
+    toml_path = target_toml_for_session_dir(results_dir)
+    if not toml_path.is_file():
+        return session
+    config = Config()
+    load_toml_into(config, toml_path)
+    return {**session, "TARGET_ATTACKER_CONTROLS_CSV": config.attacker_controls_csv()}
+
+
 def target_toml_for_session_dir(session_dir: str | os.PathLike) -> Path:
     """Return target.toml for a backend results directory."""
     d = Path(session_dir)

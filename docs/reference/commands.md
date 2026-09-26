@@ -505,7 +505,7 @@ read the command's source and its tests before depending on one.
 | `bin/run-asan`, `bin/run-ubsan`, `bin/run-msan`, `bin/run-tsan` | Per-sanitizer execution wrappers. `bin/probe` selects and invokes these. |
 | `bin/run-sanitizer-multi` | Repeats a sanitizer runner and reduces the results to one verdict; the `--confirm` path. |
 | `bin/triage-fuzz-crashes` | Summarises non-noise libFuzzer artifacts from an S4 campaign. |
-| `bin/validate-finding` | Runs one independent source-reading review over a single FIND. |
+| `bin/validate-finding` | Runs one independent source-reading review over a single FIND, under the threat model its results tree pinned. |
 | `bin/enrich-report` | Inlines source snippets and writes the `## Patch` section. The only writer of that section. |
 | `bin/severity-sweep` | Re-scores the cluster representatives of a results pool. |
 | `bin/render-md` | Renders a report's `.html` sibling: the Markdown body inside the evidence-page shell, with the action card and evidence rail read from the bundle's sidecars. |

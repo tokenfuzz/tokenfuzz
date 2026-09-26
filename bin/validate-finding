@@ -23,6 +23,7 @@ import llm_invoke
 import llm_usage
 import prompt_render
 import report_identity
+import target_config
 import triage_validate
 
 VOTES = {"Promote": 0, "Reject": 1, "Uncertain": 2}
@@ -407,6 +408,18 @@ def main(argv=None) -> int:
     if not args.finding and not args.batch_manifest:
         print("FATAL: --finding or --batch-manifest is required", file=sys.stderr)
         return 4
+    if args.finding:
+        # Run by hand, a review still judges under the threat model its
+        # results tree pinned, not a bytes default.
+        results = next(
+            (parent for parent in Path(args.finding).resolve().parents
+             if (parent / ".session-env").is_file()),
+            None,
+        )
+        if results is not None:
+            for key, value in target_config.pinned_session_environment(results).items():
+                if not os.environ.get(key):
+                    os.environ[key] = value
     if args.batch_manifest:
         if args.gate != "trigger":
             print("FATAL: batch manifests support only the trigger gate", file=sys.stderr)

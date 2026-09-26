@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import os
@@ -11,7 +12,8 @@ import shutil
 import subprocess
 import sys
 import time
-from collections.abc import Collection
+from collections.abc import Collection, Iterator
+from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
@@ -3269,6 +3271,40 @@ def replay_unmeasured(directory: Path) -> bool:
     )
 
 
+@contextmanager
+def pinned_session(results_dir: str | os.PathLike[str]) -> Iterator[None]:
+    """Run a gate under the session its results tree pinned.
+
+    A live audit exports its session. A post-wall or operator gate run did
+    not, so every vote and receipt fell back to `attacker_controls=bytes` and
+    rejected triggers the target's pinned controls include. Variables the
+    caller set still win; the rest are restored on exit so one process can
+    gate several trees.
+    """
+    adopted: list[tuple[str, str | None]] = []
+    for key, value in target_config.pinned_session_environment(results_dir).items():
+        if not os.environ.get(key):
+            adopted.append((key, os.environ.get(key)))
+            os.environ[key] = value
+    try:
+        yield
+    finally:
+        for key, previous in adopted:
+            if previous is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = previous
+
+
+def _in_pinned_session(gate):
+    @functools.wraps(gate)
+    def run(results_dir, *args, **kwargs):
+        with pinned_session(results_dir):
+            return gate(results_dir, *args, **kwargs)
+    return run
+
+
+@_in_pinned_session
 def triage_crash_dirs(
     results_dir: str | os.PathLike[str],
     target_root: str | os.PathLike[str],
@@ -5036,6 +5072,7 @@ def reject_availability_only(
     return kept
 
 
+@_in_pinned_session
 def validate_find_gate(
     results_dir: str | os.PathLike[str],
     *,
