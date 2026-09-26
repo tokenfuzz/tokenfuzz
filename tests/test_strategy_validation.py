@@ -46,6 +46,18 @@ class StrategyValidationTests(unittest.TestCase):
             self.assertIn(expected, rules)
         self.assertFalse((REFERENCES / "directory-lookup.md").exists())
 
+    def test_rotation_guidance_names_the_active_hypothesis_statuses(self) -> None:
+        # Agents keep work alive across a rotation by status, and the harness
+        # holds rotation while any such row is active. A status the state
+        # store never writes is an instruction no agent can follow.
+        expected = set(workqueue.ACTIVE_HYPOTHESIS_STATUSES)
+        for path in (ROOT / "AGENTS.md", STRATEGIES / "README.md"):
+            with self.subTest(path=str(path.relative_to(ROOT))):
+                text = " ".join(path.read_text(encoding="utf-8").split())
+                named = re.search(r"keep your active hypotheses \(([^)]+)\) alive", text)
+                self.assertIsNotNone(named)
+                self.assertEqual({s.strip() for s in named.group(1).split("/")}, expected)
+
     def test_retired_strategy_files_and_references_do_not_return(self) -> None:
         retired = (
             "S6-state-machine.md", "S7-cross-browser.md",

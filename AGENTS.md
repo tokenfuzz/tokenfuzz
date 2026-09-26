@@ -92,7 +92,7 @@ Prefer the sanitizer wrappers (`bin/run-asan`, `bin/run-ubsan`, `bin/run-msan`,
 2. Leftover testcase without sanitizer output? Run the sanitizer NOW or delete.
 3. **Cold start:** Use `bin/state add-hyp` to record 3-5 hypotheses from one subsystem.
 4. **After compression:** Start from structured state (`bin/state resume --agent <n>`); resume the top PENDING item before claiming new work, and do not re-read `PRIOR SESSION SEED` ranges.
-5. The harness embeds a condensed **session-rules digest** in your prompt (coverage-gate workflow, structured guard notes, search discipline, FIND quality bar). Rely on it. Read the full `.agents/references/session-rules.md` only if the digest is ambiguous for your situation — it is ~22 KB and re-sends on every later turn once read.
+5. The harness embeds a condensed **session-rules digest** in your prompt (coverage-gate workflow, structured guard notes, search discipline, FIND quality bar). Rely on it. Read the full `.agents/references/session-rules.md` only if the digest is ambiguous for your situation — once read, it re-sends on every later turn.
 
 ---
 
@@ -116,7 +116,7 @@ open the full strategy file only for the one technique section a hypothesis
 on your assigned card needs.
 
 **Auto-rotation:** The harness may rotate strategy after sustained dry work; S1 prior-fix review gets a longer runway because patch analysis often needs several dry iterations before the first testcase.
-If the current strategy yields nothing on this subsystem, **switch strategy first, not subsystem** — keep active HIT / NEEDS_TESTCASE / NEEDS_DEEPER_PROBE rows alive while you exhaust strategies. Only pivot subsystems either (a) after you confirm a crash and the harness opens neighbor cards to you (see Critical Rule 7), or (b) the queue assigns you a card in a different subsystem because every in-subsystem card is claimed/discarded.
+If the current strategy yields nothing on this subsystem, **switch strategy first, not subsystem** — keep your active hypotheses (PENDING / INVESTIGATING / NEEDS_TESTCASE) alive while you exhaust strategies. Only pivot subsystems either (a) after you confirm a crash and the harness opens neighbor cards to you (see Critical Rule 7), or (b) the queue assigns you a card in a different subsystem because every in-subsystem card is claimed/discarded.
 
 ---
 
@@ -227,12 +227,12 @@ Required:
 ## STRUCTURED STATE
 
 Use `bin/state`; do not maintain a parallel Markdown journal. Key rules:
-- Each hypothesis fills ALL columns: File:Function:Line, Input Shape, Guard Gap, Expected Diagnostic
+- Fill every hypothesis field: File:Function:Line, Input Shape, Guard Gap, Expected Diagnostic
 - NEUTRAL vocabulary. "Issue in File:Function:Line" not defect class names
 - Valid statuses: PENDING, INVESTIGATING, NEEDS_TESTCASE, ENV-BLOCKED, DISCARDED, CRASH-XXX, FIND-XXX
 - Max 3 NEEDS_TESTCASE, 3 ENV-BLOCKED at any time
 - Update after EVERY hypothesis closure, not at session end
-- Keep live state compact: max 8 active rows and max 15 recent terminal rows. Move long history into reports or crash/finding dirs.
+- Keep at most 8 hypotheses active at a time.
 
 ---
 

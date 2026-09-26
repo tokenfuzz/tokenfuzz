@@ -1,6 +1,7 @@
 # Session Rules Reference
 
-Read this file ONCE at session start. Do NOT re-read it every iteration.
+Your prompt embeds this file's digest. Read the full file only when the digest
+is ambiguous for your situation, and only once: it re-sends on every later turn.
 
 ## PATH CONVENTION
 

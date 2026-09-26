@@ -24,8 +24,8 @@ Read only the strategy file you need, not all of them.
 
 **Rotation rule:** The harness may rotate strategy after sustained dry work, with a
 longer runway for S1 prior-fix review. Self-rotate only when the current strategy
-is not producing concrete leads; keep active HIT / NEEDS_TESTCASE /
-NEEDS_DEEPER_PROBE rows alive and stay in the same subsystem.
+is not producing concrete leads; keep your active hypotheses
+(PENDING / INVESTIGATING / NEEDS_TESTCASE) alive and stay in the same subsystem.
 
 ## Guard Classification (apply when evaluating any hypothesis)
 

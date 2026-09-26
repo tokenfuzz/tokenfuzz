@@ -3798,8 +3798,11 @@ def update_jsonl(path: Path, update_fn) -> tuple[list[dict], object]:
         return rows, result
 
 
+ACTIVE_HYPOTHESIS_STATUSES = frozenset({"PENDING", "INVESTIGATING", "NEEDS_TESTCASE"})
+
+
 def is_active_hypothesis_status(status: str) -> bool:
-    return (status or "") in {"PENDING", "INVESTIGATING", "NEEDS_TESTCASE"}
+    return (status or "") in ACTIVE_HYPOTHESIS_STATUSES
 
 
 # Canonical hypothesis bug-class taxonomy (the sanitizer-oriented `diagnostic`
@@ -7758,15 +7761,14 @@ def state_resume(
     # opt-in via STATE_RESUME_INCLUDE_TRIED=1 because Recent Runs already
     # reports the verdict-by-testcase view that matters for triage; the
     # tried-inputs log is a hash-dedupe surface that agents can reach via
-    # `bin/state recent-tried` on demand. The cheat sheet has been moved
-    # to `.agents/references/session-rules.md` (read once at session start)
-    # so we don't bill it every resume.
+    # `bin/state recent-tried` on demand. The cheat sheet is in the prompt
+    # itself (the session-rules digest, or the compact contract's command
+    # block), so resume does not bill it again.
     resume_limit = _int_env("STATE_RESUME_RECENT_LIMIT", 5)
-    # Structured-state hygiene caps recent terminal rows at 15. When a card is
-    # assigned after a finding, show bounded history from the same source file
-    # so unrelated recent work cannot hide an already-discarded shape and
-    # companion strategies do not duplicate it. Global resumes keep the
-    # smaller operator-selected digest.
+    # When a card is assigned after a finding, show at least 15 recent
+    # hypotheses from the same source file so unrelated recent work cannot
+    # hide an already-discarded shape and companion strategies do not
+    # duplicate it. Global resumes keep the smaller operator-selected digest.
     # An active resume can contain several live hypotheses. Keep that digest
     # agent-wide so selecting the newest row above does not hide and strand its
     # siblings. Card scoping is for the re-offered-card case this guard fixes.
