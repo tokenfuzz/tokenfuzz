@@ -205,6 +205,14 @@ class CrashStateDedupTests(unittest.TestCase):
         self.assertNotEqual(first, crash_bundle.crash_state(go_fault("0x110390000", 275)))
         self.assertIsNone(crash_bundle.crash_state(go_fault("0x10", 270)),
                           "a null-page fault is not credited and gets no state")
+        # A null-page first run must not lend its stack to a later run's
+        # credited fault: that identity would suppress a distinct crash.
+        mixed = go_fault("0x10", 10) + "\n" + go_fault("0x110390000", 270)
+        self.assertEqual(crash_bundle.crash_state(mixed), first)
+        self.assertNotEqual(
+            crash_bundle.crash_state(mixed),
+            crash_bundle.crash_state(go_fault("0x110390000", 10)),
+        )
 
     def test_unsymbolized_frames_keep_their_module_offsets(self) -> None:
         # Scrubbing the offset as an address made every raw frame in one

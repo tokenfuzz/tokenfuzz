@@ -216,7 +216,37 @@ def first_sanitizer_diagnostic(text: str) -> str | None:
             first = block
         if interesting_frames(block, want=1):
             return block
-    return first
+    return first or _first_go_fatal_report(text)
+
+
+# A Go runtime fatal report opens with its fault or checkptr line and carries
+# the faulting goroutine's traceback before the next confirmation run's report.
+_GO_REPORT_START_RE = re.compile(
+    r"^(?:unexpected fault address 0x[0-9a-fA-F]+|fatal error: checkptr:)",
+    re.MULTILINE,
+)
+
+
+def _first_go_fatal_report(text: str) -> str | None:
+    """The first Go fatal report probe credits, else the first one.
+
+    Fault and stack must come from one run: a transcript whose first run hit
+    the null page and whose second faulted elsewhere would otherwise pair the
+    credited fault with the uncredited run's stack.
+    """
+    import verdict  # lazy: verdict stays free of stack parsing
+
+    starts = [match.start() for match in _GO_REPORT_START_RE.finditer(text)]
+    reports = [
+        text[start:(starts[index + 1] if index + 1 < len(starts) else len(text))]
+        for index, start in enumerate(starts)
+    ]
+    credited = next(
+        (report for report in reports
+         if verdict.go_memory_fault(report) or report.startswith("fatal error: checkptr:")),
+        None,
+    )
+    return credited or (reports[0] if reports else None)
 
 
 def first_stacked_sanitizer_diagnostic(text: str) -> str | None:

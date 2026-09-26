@@ -419,10 +419,12 @@ def sanitizer_fault_key(text: str) -> tuple[str, str] | None:
         return sanitizer, "data-race"
     # Go's runtime reports that probe credits as crashes; without a key their
     # repeats were never recognized as the same crash.
+    # Read from the first diagnostic, the same run crash_state takes frames
+    # from, so a credited fault is never paired with another run's stack.
     if sanitizer in {"race", ""}:
-        if verdict.go_memory_fault(text):
+        if verdict.go_memory_fault(diagnostic):
             return sanitizer or "go", "go-fault"
-        if re.search(r"^fatal error: checkptr:", text, re.MULTILINE):
+        if re.search(r"^fatal error: checkptr:", diagnostic, re.MULTILINE):
             return sanitizer or "go", "go-checkptr"
     return None
 
