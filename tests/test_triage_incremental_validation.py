@@ -3640,7 +3640,10 @@ Generated score text.
         vote = trigger_vote(self.report, self.root, "Uncertain")
         vote["trigger_controls_fit"] = "outside"
         vote_file.write_text(json.dumps(vote), encoding="utf-8")
-        with mock.patch.dict(os.environ, {"TARGET_ROOT": str(self.root)}):
+        (self.root / ".session-env").write_text(
+            f"TARGET_ROOT={self.root}\n", encoding="utf-8",
+        )
+        with mock.patch.dict(os.environ, {"TARGET_ROOT": ""}):
             facts = triage._source_review_facts(self.report, (vote_file,))
         self.assertEqual(facts, {"trigger_controls_fit": "outside"})
         self.assertEqual(

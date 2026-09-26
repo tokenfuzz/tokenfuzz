@@ -11,7 +11,7 @@ from typing import Iterable
 
 # Bump whenever the trigger-provenance prompt changes classification semantics.
 # Old verdicts then fail open and receive a fresh source-reading review.
-TRIGGER_GATE_DECISION_VERSION = "trigger-v15-address-knowledge"
+TRIGGER_GATE_DECISION_VERSION = "trigger-v18-prior-recipient"
 # A resolver reads the cached reviews as evidence and answers their exact open
 # question. It has a separate identity so changing that policy never invalidates
 # the independent first-pass votes it is meant to adjudicate.

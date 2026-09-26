@@ -2530,6 +2530,17 @@ def _unsettled_scope_fact(report: Path, vote_files: tuple[Path, ...]) -> str:
     the way a settled vote's are, and anything unverifiable here contributes no
     fact at all, leaving the artifact pending.
     """
+    # Standalone and post-wall gates may not inherit the audit process's
+    # TARGET_ROOT. The report's pinned session identifies the source whose
+    # anchors the reviewers read; ambient state is only a legacy fallback.
+    target_root = target_config.find_target_root(
+        report, repository_root=SCRIPT_ROOT,
+    )
+    if target_root is None:
+        value = os.environ.get("TARGET_ROOT", "")
+        target_root = Path(value) if value else None
+    if target_root is None or not target_root.is_dir():
+        return ""
     observed: set[str] = set()
     for vote_file in vote_files:
         if _cached_trigger_vote(report, vote_file) != "Uncertain":
@@ -2545,10 +2556,6 @@ def _unsettled_scope_fact(report: Path, vote_files: tuple[Path, ...]) -> str:
         # A stale anchor contributes nothing and the artifact stays pending.
         anchors = payload.get("anchors")
         if payload.get("anchors_verified") is not True or not anchors:
-            continue
-        target_root_value = os.environ.get("TARGET_ROOT", "")
-        target_root = Path(target_root_value)
-        if not target_root_value or not target_root.is_dir():
             continue
         if triage_validate.verify_source_anchors(anchors, target_root) != anchors:
             continue

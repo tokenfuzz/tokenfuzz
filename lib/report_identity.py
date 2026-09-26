@@ -10,7 +10,7 @@ from collections.abc import Iterable
 from pathlib import Path
 
 
-FIND_QUALITY_DECISION_VERSION = "v21-supported-config"
+FIND_QUALITY_DECISION_VERSION = "v22-prior-recipient"
 # The report an artifact directory holds, in priority order. Names are
 # matched exactly against the directory listing; a spelling that differs
 # only in case is not a report.

@@ -52,6 +52,19 @@ call chain is not enough by itself. If the report cannot name a source,
 control/sink, and product boundary, reject unless it gives a concrete native
 memory-safety code walk-through that makes the security impact obvious.
 
+When the malformed bytes live in a product-managed database or cache, show
+how an allowed caller writes or imports those exact bytes into that private
+file. A direct library harness proves the parser defect, but control of an
+unrelated filesystem tree or API request does not establish the product
+security boundary.
+
+For a credential or header-forwarding disclosure, trace the first request as
+well as the redirected one. If the first recipient already receives the same secret
+before choosing the later destination, an attacker who controls that first
+recipient has gained no data. Keep only when the report establishes a distinct
+actor who can choose the later destination without receiving the first request,
+or another concrete security effect.
+
 Names such as `hook`, `plugin`, `template`, `callback`, or `command` do not
 make a value trusted. Determine control from the traced entrypoint and target
 threat model. When a public input boundary supplies the value and the report

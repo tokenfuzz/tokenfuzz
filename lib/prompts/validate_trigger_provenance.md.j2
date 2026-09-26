@@ -97,6 +97,11 @@ state** and the report's **exact claimed security consequence**:
 >       - disclosure: the bytes reaching the claimed sink are fixed, zero, or
 >         attacker-derived, so they cannot contain the victim, cross-request,
 >         cross-tenant, credential, or arbitrary-process data the report claims;
+>         for header forwarding, check whether the first recipient already receives the same secret
+>         before it chooses a redirect. If the same actor controls that first
+>         response and later destination, the forwarding gives it no new data;
+>         a different actor controlling an open redirect must be established
+>         from the product path, not imagined as an alternate scenario;
 >       - semantic-boundary: the claimed missing security decision is enforced
 >         elsewhere on every relevant path.
 >       This is affirmative disproof, not missing evidence. If the consequence
@@ -143,6 +148,25 @@ Reject under (d) only when source or build documentation affirmatively shows
 that the surface is test-only, internal tooling, or otherwise not shipped.
 
 {{ product_boundary_block }}
+
+For a finding in a vendored dependency or copied subproject, establish a
+production import or call chain from the audited product to that copy before
+attributing the issue to this target. A standalone harness that invokes the
+dependency's public API proves a defect in that dependency; a hypothetical
+embedding that forwards attacker input does not prove the audited product
+exposes it. If the target itself ships that public API as a library, trace the
+published boundary instead. Reject as nonshipping only when the production
+dependency graph establishes no such route; vote Uncertain when the graph or
+build selection remains unresolved.
+
+For a product-managed database or cache, a production call to its parser does
+not establish attacker control of the file's exact malformed bytes. Trace a
+permitted write or import path into that file and the malformed field. Control
+of another filesystem tree, API object, or container mount is not control of
+the service's private state directory. `fs-state` in a threat model does not
+grant arbitrary writes to every host path. Vote Uncertain when that ingress is
+unresolved; do not invent file placement to make a standalone library
+reproducer fit the product.
 {{ resolution_block }}
 
 # Method
@@ -243,6 +267,15 @@ whitespace removed. The harness verifies those fields, computes and persists
 the excerpt SHA-256, and downgrades an unverifiable Promote or Reject to
 Uncertain.
 
+A confirmed public API defect that needs application-chosen parameters under a
+bytes-only threat model is Promote with `trigger_controls_fit: outside`: the
+defect is real and earns no security credit. Do not vote Uncertain
+merely because the proven public call sequence is outside the configured
+attacker controls. If the defect itself remains unresolved but source settles
+scope, Uncertain with `trigger_controls_fit: outside` needs a source anchor
+showing who chooses the required parameter. Without a verifiable anchor that
+scope fact cannot close the review.
+
 Definitions:
 - **Promote**: you constructed a concrete attacker-reachable path (bytes or a
   public call sequence) into the triggering state, and source supports the
@@ -285,6 +318,10 @@ Definitions:
   bytes-only target, never sufficient: a fault that needs attacker bytes AND a
   specific application call order is `outside` on a `bytes` target, because the
   attacker cannot make the application issue that order.
+  A byte-typed compiler or FFI attribute generated from application parameters
+  is not automatically attacker data. Trace a shipped caller or loader carrying
+  external data into that exact attribute before marking it `within`; otherwise
+  answer `outside` if its trusted origin is proved, or `unclear` if unresolved.
   What is NOT a component: the application's fixed, contract-obeying setup —
   creating or reusing a context, selecting a supported mode or option, and
   calling the documented entry point that consumes the input. Those the

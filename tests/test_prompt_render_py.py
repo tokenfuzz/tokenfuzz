@@ -244,6 +244,15 @@ ok("consequence-disproved" in vp,
    "validator: affirmative consequence disproof has a closed rejection kind")
 ok("different scenario" in vp,
    "validator: an alternate scenario cannot rescue a refuted report")
+ok("first recipient already receives the same secret" in vp,
+   "validator: a later forwarding claim checks what the first recipient saw")
+ok("vendored dependency" in vp and "production import or call chain" in vp
+   and "hypothetical embedding" in vp,
+   "validator: a dependency finding needs an audited-product route")
+ok("product-managed database or cache" in vp
+   and "exact malformed bytes" in vp
+   and "Uncertain" in vp,
+   "validator: a product import does not imply control of its private state bytes")
 # Scope is what the whole trigger fit needs, not what any one component
 # contributes: on a bytes-only target, crafted bytes plus an application call
 # order the attacker cannot issue is out of the model, and publication follows
@@ -252,8 +261,15 @@ ok("cover ALL of them" in vp and "never sufficient" in vp,
    "validator: trigger fit needs every required component covered")
 ok("AND a specific application call order is `outside`" in vp,
    "validator: a mixed bytes-plus-call-order trigger is out of a bytes model")
+ok("byte-typed compiler or FFI attribute" in vp
+   and "external data into that exact attribute" in vp,
+   "validator: serialized application parameters are not automatically attacker bytes")
 ok("calling the documented entry point that consumes the input" in vp,
    "validator: ordinary fixed setup is not a trigger component")
+ok("confirmed public API defect" in vp and "Promote with `trigger_controls_fit: outside`" in vp,
+   "validator: out-of-model confirmed defects remain recorded without security credit")
+ok("Uncertain with `trigger_controls_fit: outside`" in vp and "source anchor" in vp,
+   "validator: an unsettled scope fact needs verifiable source evidence")
 ok("resource shaping performed before input consumption" in rf
    and "keep `trigger_source` as `bytes`" in rf,
    "reach-fields: a fixed production fallback remains byte-triggered")
@@ -336,6 +352,8 @@ ok("MUST name" in fq and "the allocation that memory comes from" in fq,
    "quality gate requires a disclosure claim to name its memory source")
 ok("known value" in fq,
    "quality gate exempts disclosure of an already-named value")
+ok("first recipient already receives the same secret" in fq,
+   "quality gate requires added disclosure beyond the first recipient")
 ok("Managed-runtime exception mismatch" in fq and "per-request" in fq,
    "quality gate rejects exception-type drift without boundary impact")
 ok("does not cover a native fault signal" in fq
