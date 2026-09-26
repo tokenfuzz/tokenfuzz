@@ -593,6 +593,10 @@ def _signature(crash_dir: Path) -> dict:
         # A concluded review whose report or scope changed underneath it is
         # not OK either; bin/severity names the same case stale.
         status = "STALE (validation no longer matches)"
+    elif (validation_receipt.read_current(crash_dir) or {}).get("state") != "reportable":
+        # Complete but not yet judged, or cut off by the wall: only a current
+        # reportable receipt publishes a crash.
+        status = "PENDING REVIEW"
 
     return {
         "id": crash_dir.name,

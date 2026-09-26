@@ -898,7 +898,10 @@ def route_finding_diagnostics(
             # bundle with no probe route, which the filing-time fold cannot
             # match, so one execution was reviewed twice. Fold it as the crash
             # lane folds its own.
-            _fold_duplicate_crash(directory, results, duplicate)
+            _fold_duplicate_crash(
+                directory, results, duplicate,
+                "identical sanitizer report already filed as {owner}",
+            )
             continue
         if directory.parent.name == "findings-rejected":
             directory = _restore_rejected_artifact(
@@ -3519,13 +3522,16 @@ def _fold_duplicate_crash_states(
     return adjudicate, deferred, folded
 
 
-def _fold_duplicate_crash(directory: Path, results: Path, owner: str) -> Path:
+def _fold_duplicate_crash(
+    directory: Path, results: Path, owner: str,
+    reason: str = "identical crash state already promoted as {owner}",
+) -> Path:
     """Move a duplicate bundle beside the crash tree and close its hypothesis."""
     root = results / "crashes" / DUPLICATE_CRASHES_DIR
     root.mkdir(parents=True, exist_ok=True)
     destination = _unique_destination(root, directory.name)
     shutil.move(str(directory), destination)
-    reason = f"identical crash state already promoted as {owner}"
+    reason = reason.format(owner=owner)
     try:
         (destination / "duplicate-of.txt").write_text(
             f"{owner}\n{reason}\n", encoding="utf-8",

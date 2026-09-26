@@ -111,7 +111,8 @@ column:
 
 | Status | Meaning |
 | --- | --- |
-| `OK` | A report is present and no content, attention, or severity marker is active. Check `validation.json` for publication state. |
+| `OK` | A current `reportable` receipt publishes the report, and no content, attention, or severity marker is active. |
+| `PENDING REVIEW` | The report is filed but has no current verdict yet, for example because the wall ended before its review. `validation.json` names the reason when a pass reached it. |
 | `NOT-REPORTABLE (no security credit)` | A current receipt retains the engineering evidence outside the security total. |
 | `NEEDS CONTENT` | No `report.md` or `description.md` exists (`.needs-content`). |
 | `NEEDS REVIEW` | The issue class is too vague for a trustworthy severity vector. |

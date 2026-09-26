@@ -611,7 +611,9 @@ The parser writes past `{object_name}`.
             line for line in cluster_text.splitlines()
             if "CRASH-P2-1" in line
         )
-        self.assertNotIn("PENDING", row)
+        self.assertNotIn("missing:", row)
+        # Complete but unjudged is still under review, not published.
+        self.assertTrue(row.rstrip().endswith("| PENDING REVIEW |"), row)
 
     def test_uncredited_crash_row_names_its_state(self) -> None:
         """The index agents read before filing must not call a zero OK.

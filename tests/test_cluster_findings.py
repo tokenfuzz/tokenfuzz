@@ -302,6 +302,27 @@ class ClusterFindingsTests(unittest.TestCase):
         self.assertNotIn("NOT-REPORTABLE", row)
         self.assertNotIn("Not a security report", row)
 
+    def test_an_unjudged_finding_is_not_listed_as_ok(self) -> None:
+        # Wall-cut findings with no verdict read "OK" beside a severity, the
+        # same as published ones.
+        unjudged = self.make_find(
+            "FIND-U1", "# Unjudged\nLocation: `src/a.c:app_open:10`\nClass: state",
+            "state", severity="high",
+        )
+        judged = self.make_find(
+            "FIND-J1", "# Judged\nLocation: `src/b.c:app_read:20`\nClass: state",
+            "state", severity="high",
+        )
+        validation_receipt.write(judged.parent, kind="finding", state="reportable")
+        process = self.run_cluster()
+        self.assertEqual(process.returncode, 0, process.stderr)
+        rows = (self.results / "findings" / "finding-clusters.md").read_text().splitlines()
+        row = {name: next(line for line in rows if f"[{name}]" in line)
+               for name in ("FIND-U1", "FIND-J1")}
+        self.assertTrue(row["FIND-U1"].rstrip().endswith("| PENDING REVIEW |"), row["FIND-U1"])
+        self.assertTrue(row["FIND-J1"].rstrip().endswith("| OK |"), row["FIND-J1"])
+        self.assertTrue(unjudged.is_file())
+
     def test_stamp_stays_out_of_a_code_fence(self) -> None:
         """Stamping must not move the report's content identity.
 
