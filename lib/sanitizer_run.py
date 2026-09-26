@@ -7,6 +7,8 @@ import json
 import os
 import shutil
 import sys
+import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Mapping, Sequence
 
@@ -50,6 +52,38 @@ def node_options(binary: str, environment: Mapping[str, str]) -> dict[str, str]:
     preload = f"--require {json.dumps(str(TYPESCRIPT_HOOKS), ensure_ascii=False)}"
     existing = environment.get("NODE_OPTIONS", "").strip()
     return {"NODE_OPTIONS": f"{existing} {preload}".strip()}
+
+
+@contextmanager
+def program_start_witness(command: list[str]):
+    """Yield the command to run and a check that its program started.
+
+    `go run` builds before it executes and exits 1 both when the build fails
+    and when the program it built exits nonzero, so a failed build read as an
+    execution attempt. Its -exec hook runs only after a successful build; the
+    hook marks a file, then execs the program. Any other command is the
+    program itself. A command that already sets -exec keeps its own hook.
+    """
+    if (
+        Path(command[0]).name != "go" or command[1:2] != ["run"]
+        or any(arg == "-exec" or arg.startswith("-exec=") for arg in command)
+    ):
+        yield command, lambda: True
+        return
+    with tempfile.TemporaryDirectory(prefix="go-run-") as scratch:
+        marker = Path(scratch) / "started"
+        # go splits -exec on spaces and keeps single-quoted fields whole.
+        hook = f"""/bin/sh -c ': > "$0"; exec "$@"' '{marker}'"""
+        yield [command[0], "run", "-exec", hook, *command[2:]], marker.exists
+
+
+def declare_not_started(returncode: int) -> None:
+    """The NO_EXEC declaration run-sanitizer-multi and bin/probe honour."""
+    print(
+        f"NO_EXEC: go run exited rc={returncode} before starting the program; "
+        "its build or module load failed (output above)",
+        file=sys.stderr,
+    )
 
 
 def end_child_output_line() -> None:
@@ -261,18 +295,22 @@ class SanitizerRunner:
         if not sanitizer.generic_skips_testcase(self.name, self.env):
             command.append(args[0])
         command.extend(args[1:])
-        completed = self._run_symbolized(
-            command, options, timeout,
-            extra_env=node_options(binary, self.runtime_env(options)),
-            rss_mb=sanitizer.generic_rss_limit_mb(self.env),
-            cwd=configured_runner_cwd(self.config, binary, self.name),
-        )
-        end_child_output_line()
+        with program_start_witness(command) as (command, started):
+            completed = self._run_symbolized(
+                command, options, timeout,
+                extra_env=node_options(binary, self.runtime_env(options)),
+                rss_mb=sanitizer.generic_rss_limit_mb(self.env),
+                cwd=configured_runner_cwd(self.config, binary, self.name),
+            )
+            end_child_output_line()
+            ran = started()
         succeeded = runner_exit_succeeded(
             self.config, completed.returncode, self.env,
         )
         if completed.returncode == 124:
             print(f"[run-{self.name}] generic runner timed out after {timeout}s", file=sys.stderr)
+        elif not ran:
+            declare_not_started(completed.returncode)
         elif succeeded:
             print(
                 f"[run-{self.name}] generic EXECUTION VERIFIED "

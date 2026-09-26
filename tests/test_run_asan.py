@@ -6,6 +6,7 @@ from __future__ import annotations
 import importlib.machinery
 import importlib.util
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -318,6 +319,69 @@ class RunAsanTests(unittest.TestCase):
              ):
             self.assertEqual(run_asan.run_generic("", 1, ["input.bin"]), 1)
 
+
+    def go_run_outputs(self, go: Path, sources: dict[str, str]) -> dict[str, str]:
+        outputs = {}
+        for name, source in sources.items():
+            testcase = self.root / f"{name}.go"
+            testcase.write_text(source, encoding="utf-8")
+            proc = self.run_command(
+                "generic", testcase, "run", testcase,
+                ASAN_GENERIC_BIN=go, ASAN_GENERIC_SKIP_TESTCASE="1",
+                ASAN_GENERIC_DISABLE_OPTIONS="1", ASAN_TIMEOUT="120",
+            )
+            outputs[name] = proc.stdout + proc.stderr
+        return outputs
+
+    def assert_go_run_start_evidence(self, outputs: dict[str, str]) -> None:
+        # A failed build never started the testcase: it declares NO_EXEC
+        # rather than an inconclusive execution. A program that ran and
+        # exited nonzero is still an execution attempt.
+        self.assertIn("NO_EXEC: go run exited rc=1", outputs["broken"])
+        self.assertNotIn("EXECUTION INCONCLUSIVE", outputs["broken"])
+        self.assertIn("EXECUTION INCONCLUSIVE (post-run, rc=1)", outputs["exits"])
+        self.assertNotIn("NO_EXEC", outputs["exits"])
+        self.assertIn("EXECUTION VERIFIED (post-run, rc=0)", outputs["clean"])
+        for name, text in outputs.items():
+            path = self.root / f"{name}.out"
+            path.write_text(text, encoding="utf-8")
+            self.assertEqual(verdict.file_declares_no_exec(path), name == "broken")
+
+    def test_go_run_build_failure_is_not_an_execution(self) -> None:
+        # Follows the go tool's contract: build, then run the program through
+        # the space-split -exec hook, and report a nonzero exit.
+        go = self.root / "bin" / "go"
+        go.parent.mkdir()
+        go.write_text(
+            f"#!{sys.executable}\n"
+            "import pathlib, shlex, subprocess, sys\n"
+            "argv = sys.argv[1:]\n"
+            "hook = shlex.split(argv[argv.index('-exec') + 1]) if '-exec' in argv else []\n"
+            "source = pathlib.Path(next(a for a in argv if a.endswith('.go'))).read_text()\n"
+            "if 'undefined' in source:\n"
+            "    print('# command-line-arguments', file=sys.stderr)\n"
+            "    raise SystemExit(1)\n"
+            "code = 3 if 'Exit(3)' in source else 0\n"
+            "rc = subprocess.run([*hook, sys.executable, '-c', f'raise SystemExit({code})']).returncode\n"
+            "if rc:\n"
+            "    print(f'exit status {rc}', file=sys.stderr)\n"
+            "raise SystemExit(1 if rc else 0)\n",
+            encoding="utf-8",
+        )
+        go.chmod(0o755)
+        self.assert_go_run_start_evidence(self.go_run_outputs(go, {
+            "broken": "undefined",
+            "exits": "os.Exit(3)",
+            "clean": "",
+        }))
+
+    @unittest.skipUnless(shutil.which("go"), "go toolchain not installed")
+    def test_real_go_run_reports_whether_its_program_started(self) -> None:
+        self.assert_go_run_start_evidence(self.go_run_outputs(Path(shutil.which("go")), {
+            "broken": "package main\nfunc main() { undefinedName() }\n",
+            "exits": "package main\nimport \"os\"\nfunc main() { os.Exit(3) }\n",
+            "clean": "package main\nfunc main() {}\n",
+        }))
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -294,22 +294,26 @@ def run_generic(
     command.extend(extra)
     rss_mb = sanitizer.generic_rss_limit_mb(BASE_ENV)
     cwd = sanitizer_run.configured_runner_cwd(CONFIG, binary, selected)
-    if disabled or selected in {"race", "runner"}:
-        # Options are off by operator choice, so there is no ASAN_OPTIONS to
-        # turn symbolization off in and nothing to symbolize.
-        completed = run_timeout(
-            command, timeout, rss_mb=rss_mb, env=environment, cwd=cwd,
-        )
-    else:
-        completed = run_symbolized(
-            command, timeout, environment, rss_mb=rss_mb, cwd=cwd,
-        )
-    sanitizer_run.end_child_output_line()
+    with sanitizer_run.program_start_witness(command) as (command, started):
+        if disabled or selected in {"race", "runner"}:
+            # Options are off by operator choice, so there is no ASAN_OPTIONS
+            # to turn symbolization off in and nothing to symbolize.
+            completed = run_timeout(
+                command, timeout, rss_mb=rss_mb, env=environment, cwd=cwd,
+            )
+        else:
+            completed = run_symbolized(
+                command, timeout, environment, rss_mb=rss_mb, cwd=cwd,
+            )
+        sanitizer_run.end_child_output_line()
+        ran = started()
     succeeded = sanitizer_run.runner_exit_succeeded(
         CONFIG, completed.returncode, BASE_ENV,
     )
     if completed.returncode == 124:
         print(f"[run-asan] generic runner timed out after {timeout}s", file=sys.stderr)
+    elif not ran:
+        sanitizer_run.declare_not_started(completed.returncode)
     elif succeeded:
         print(
             f"[run-asan] generic EXECUTION VERIFIED (post-run, "

@@ -193,7 +193,8 @@ def text_has_crash(text: str) -> bool:
 
 #: A testcase or harness declaring that nothing executed: a managed
 #: prerequisite it checked for was absent. Agent-authored, so it can only
-#: withhold a verdict, never earn one.
+#: withhold a verdict, never earn one. The generic runner declares it too,
+#: for a `go run` whose build failed before the program started.
 _NO_EXEC_DECLARED_RE = re.compile(r"^NO_EXEC: \S")
 
 

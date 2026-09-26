@@ -162,7 +162,7 @@ Common outcomes:
 
 | Outcome | Meaning | Action |
 | --- | --- | --- |
-| `NO_EXEC` | Nothing ran: the testcase is missing, the probe refused the route, or the per-iteration sanitizer launch budget is exhausted (`budget-exhausted`). | Fix the prerequisite, or wait for the next iteration. Not clean evidence; never a reason to discard a hypothesis. |
+| `NO_EXEC` | Nothing ran: the testcase is missing, the probe refused the route, a `go run` testcase failed to build, or the per-iteration sanitizer launch budget is exhausted (`budget-exhausted`). | Fix the prerequisite, or wait for the next iteration. Not clean evidence; never a reason to discard a hypothesis. |
 | `EXEC_FAIL` | The command started but produced no valid result. The recorded reason names the class (`loader`, `usage`, `input-rejected`, `aborted`, `unverified-exit`, or `exit`) and the repair it implies. | Fix what the class names: the route, the argv, the harness, or the input. The launch still counts against the sanitizer budget. |
 | Missed the target code | The coverage replay did not reach the named function. Browser and JS modes skip the sanitizer; a native target still runs it and records the miss beside the verdict. | Revise the input around the closest reached frame. |
 | Clean hit | The code ran but the sanitizer was quiet. | Mutate input shape, state, timing, or allocator layout. |
