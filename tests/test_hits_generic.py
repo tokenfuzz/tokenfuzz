@@ -614,6 +614,29 @@ class GenericCoverageTests(unittest.TestCase):
         self.assertTrue(timed_out)
         self.assertIsNone(lines)
         self.assertLess(elapsed, 60, "the call ran past its own deadline")
+
+    def test_a_module_symbolizer_timeout_is_not_repeated(self) -> None:
+        if sys.platform != "darwin":
+            self.skipTest("atos timeout caching is macOS-only")
+        shim = Path(self._tmp.name) / "timed-out-atos"
+        shim.mkdir(exist_ok=True)
+        calls = shim / "calls"
+        (shim / "atos").write_text(
+            f'#!/bin/sh\necho call >> "{calls}"\nexit 124\n', encoding="utf-8"
+        )
+        (shim / "atos").chmod(0o755)
+        environment = {"PATH": f"{shim}:{os.environ['PATH']}"}
+        for _ in range(2):
+            timed_out = self._run_hits("app_parse", environment=environment)
+            self.assertEqual(timed_out.returncode, 3, timed_out.stdout + timed_out.stderr)
+        self.assertEqual(calls.read_text().count("call"), 2,
+                         "one timeout alone does not stop symbolizing the module")
+        self.testcase.write_bytes(b"yyyyyyyy")
+        changed = self._run_hits("app_parse", environment=environment)
+        self.assertEqual(changed.returncode, 3, changed.stdout + changed.stderr)
+        self.assertEqual(calls.read_text().count("call"), 2,
+                         "a module that timed out twice is not retried for another PC set")
+
     def test_a_coverage_failure_names_which_failure_it_was(self) -> None:
         """One label for three unrelated causes cost a day of diagnosis.
 

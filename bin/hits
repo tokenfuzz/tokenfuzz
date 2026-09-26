@@ -656,7 +656,11 @@ class Hits:
                 by_binary.setdefault(str(target), []).extend(offsets)
         if not frames:
             return [], []
-        lines, timed_out = self._batch_atos(by_binary, arch)
+        results_dir = (
+            self.config.results_dir if self.config else os.environ.get("RESULTS_DIR", "")
+        )
+        timeout_cache = Path(results_dir) / "state" / "atos-timeouts" if results_dir else None
+        lines, timed_out = self._batch_atos(by_binary, arch, timeout_cache)
         if timed_out:
             # The tool, not the input: retrying it through the shared path
             # would spend the same budget wedging on the same binary.
@@ -718,6 +722,7 @@ class Hits:
     @staticmethod
     def _batch_atos(
         by_binary: dict[str, list[str]], arch: str,
+        timeout_cache: Path | None = None,
     ) -> "tuple[list[str] | None, bool]":
         """Resolve each module's whole offset list in one `atos` call, or None.
 
@@ -750,6 +755,28 @@ class Hits:
             return None, False
         lines: list[str] = []
         for binary, offsets in by_binary.items():
+            marker = None
+            if timeout_cache is not None:
+                # Keyed on the module, not its address list: atos spends its
+                # budget loading a large module's debug map, and a module that
+                # timed out with one address times out with thousands. Each
+                # probe reaches a different address set, so a per-set key
+                # never matched and every probe paid the whole deadline again.
+                # Two timeouts are needed, so one slow call under load does not
+                # end symbolization of that module for the rest of the run.
+                try:
+                    binary_stat = Path(binary).stat()
+                    atos_stat = Path(atos).stat()
+                    identity = (
+                        f"{Path(binary).resolve()}\0{binary_stat.st_size}\0"
+                        f"{binary_stat.st_mtime_ns}\0{arch}\0{atos}\0"
+                        f"{atos_stat.st_mtime_ns}"
+                    )
+                    marker = timeout_cache / f"{hashlib.sha256(identity.encode()).hexdigest()}.timeout"
+                    if marker.is_file() and marker.stat().st_size >= 2:
+                        return None, True
+                except OSError:
+                    marker = None
             completed = run_timeout(
                 [atos, "-o", binary, "-arch", arch, "-fullPath"],
                 sanitizer.SYMBOLIZE_TIMEOUT_SECONDS,
@@ -757,6 +784,14 @@ class Hits:
                 capture_output=True, text=True,
             )
             if completed.returncode == TIMEOUT_RC:
+                if marker is not None:
+                    try:
+                        marker.parent.mkdir(parents=True, exist_ok=True)
+                        # One byte per timeout; the size is the count.
+                        with marker.open("ab") as stream:
+                            stream.write(b"x")
+                    except OSError as exc:
+                        print(f"WARN: could not cache atos timeout: {exc}", file=sys.stderr)
                 return None, True
             if completed.returncode != 0:
                 return None, False
@@ -945,9 +980,9 @@ class Hits:
         if self.symbolize_timed_out:
             return (
                 "COVERAGE_SYMBOLIZE_FAIL",
-                "the symbolizer was killed at its "
-                f"{sanitizer.SYMBOLIZE_TIMEOUT_SECONDS}s deadline with the "
-                "run's PCs still unresolved",
+                "the symbolizer could not resolve these PCs within its "
+                f"{sanitizer.SYMBOLIZE_TIMEOUT_SECONDS}s deadline; this run "
+                "does not retry an unchanged module",
             )
         if self.harness_only_coverage:
             return (
