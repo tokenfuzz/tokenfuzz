@@ -72,13 +72,17 @@ class SetupTargetTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
-    def test_backend_candidates_try_requested_oss_once(self) -> None:
+    def test_a_pinned_backend_never_falls_back_to_another_provider(self) -> None:
+        # A pinned run's model name is invalid on another provider, and a
+        # fallback that did answer would change the run on other credentials.
         setup = SETUP_TARGET.Setup.__new__(SETUP_TARGET.Setup)
         setup.answering_backend = ""
-        with mock.patch.dict(os.environ, {"ACTIVE_BACKEND": "oss"}, clear=True):
+        for pinned in ("oss", "codex"):
+            with mock.patch.dict(os.environ, {"ACTIVE_BACKEND": pinned}, clear=True):
+                self.assertEqual(setup.backend_candidates(), [pinned])
+        with mock.patch.dict(os.environ, {}, clear=True):
             self.assertEqual(
-                setup.backend_candidates(),
-                ["oss", "claude", "codex", "gemini", "grok"],
+                setup.backend_candidates(), ["claude", "codex", "gemini", "grok"],
             )
 
     def test_generated_recipe_applies_only_to_its_detected_build_system(self) -> None:

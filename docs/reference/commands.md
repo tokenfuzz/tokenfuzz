@@ -82,12 +82,14 @@ into `output/<target>/target.toml` and `--force` overwrites an existing
 section. They ask the model once, except that `bin/suggest-runner` permits
 one revision after launch validation rejects a proposal.
 
-`bin/setup-target` runs each helper on the requested backend first, then in
-`claude → codex → gemini → grok` order. A call that fails or an answer that
-does not validate moves on to the next backend, and the backend that
-answered is tried first for the rest of that run only. A failure the helper
-reports about the target itself, such as a CLI with no readable help, is
-logged once and not retried on another backend.
+`bin/setup-target` runs each helper only on a pinned backend
+(`ACTIVE_BACKEND`, as an audit sets it): another provider would not accept
+the pinned model and would change the run's cost and behavior. With no
+backend pinned, it tries `claude → codex → gemini → grok`; a call that fails
+or an answer that does not validate moves on to the next backend, and the
+backend that answered is tried first for the rest of that run only. A
+failure the helper reports about the target itself, such as a CLI with no
+readable help, is logged once and not retried on another backend.
 
 `bin/suggest-runner` reads the help that a bounded set of instrumented CLIs
 declared by the build print for `--help`, `-h`, or no argument at all (a

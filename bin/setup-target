@@ -552,19 +552,24 @@ class Setup:
         self.seeded_full = True
 
     def backend_candidates(self) -> list[str]:
-        """Backends to try, in order: the requested one, then the defaults.
+        """Backends to try: only a pinned one, otherwise the defaults.
 
-        A backend that answered earlier in this run is tried first for the
-        next helper, so an unavailable default costs one failed call per run
-        rather than one per helper. That preference lives in this process
-        only. It was once written to disk and read back by every later run,
-        which silently reordered the defaults for every target on the host:
-        after one outage the first default was never tried first again.
+        A pinned run never falls back to another provider. Its model name is
+        invalid there, and a fallback that did answer would change the run's
+        cost and behavior on credentials it was never given.
+
+        Unpinned, a backend that answered earlier in this run is tried first
+        for the next helper, so an unavailable default costs one failed call
+        per run rather than one per helper. That preference lives in this
+        process only. It was once written to disk and read back by every later
+        run, which silently reordered the defaults for every target on the
+        host: after one outage the first default was never tried first again.
         """
         requested = os.environ.get("ACTIVE_BACKEND", os.environ.get("BACKEND", os.environ.get("AUDIT_BACKEND", "")))
+        if requested and requested != "all":
+            return [requested]
         result: list[str] = []
-        preferred = [requested] if requested and requested != "all" else []
-        preferred += [self.answering_backend] if self.answering_backend else []
+        preferred = [self.answering_backend] if self.answering_backend else []
         for candidate in preferred + ["claude", "codex", "gemini", "grok"]:
             if candidate and candidate not in result:
                 result.append(candidate)
