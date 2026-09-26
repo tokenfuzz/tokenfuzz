@@ -2246,6 +2246,34 @@ class SetupTargetTests(unittest.TestCase):
             "fresh",
         )
 
+    def test_missing_host_prerequisite_stops_backend_repair_fallback(self) -> None:
+        target = self.make_build_target("hosttool")
+        recipe = self.build_recipe(target)
+        recipe.write_text(f"#!{sys.executable}\nraise SystemExit(7)\n")
+        recipe.chmod(0o755)
+        config = self.config("hosttool")
+        config.parent.mkdir(parents=True)
+        config.write_text(
+            'target = "hosttool"\nbuild_system = "cmake"\n'
+            'asan_bin = "build-asan/hosttool"\n'
+        )
+        calls = self.temp / "repair-backends"
+        helper = self.harness / "bin" / "auto-build-script"
+        helper.write_text(
+            f"#!{sys.executable}\nimport os\nfrom pathlib import Path\n"
+            f"with Path({str(calls)!r}).open('a') as stream:\n"
+            "    stream.write(os.environ['ACTIVE_BACKEND'] + '\\n')\n"
+            "raise SystemExit(5)\n",
+            encoding="utf-8",
+        )
+        helper.chmod(0o755)
+        result = self.setup(
+            "hosttool", "--build",
+            environment={"ACTIVE_BACKEND": "codex", "LLM_DECIDE_DISABLE": "0"},
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(calls.read_text().splitlines(), ["codex"])
+
     def test_stamped_build_that_stops_starting_is_rebuilt(self) -> None:
         target = self.make_build_target("hostdrift")
         self.build_recipe(target)

@@ -240,6 +240,14 @@ ok(abs_mod.detect_missing_commands(
 ) == ["meson"],
    "detect: command name extracted, path 'not found' lines ignored")
 
+ok(abs_mod.detect_missing_commands(
+    "Did not find pkg-config by name 'pkg-config'\n"
+    "Found pkg-config: NO\n"
+    "ERROR: Dependency lookup for samplelib with method 'pkg-config' failed: "
+    "Pkg-config for machine host machine not found. Giving up.\n"
+) == ["pkg-config"],
+   "detect: Meson missing pkg-config is a host prerequisite")
+
 
 # ─── prompt assembly ───────────────────────────────────────────────
 
@@ -544,6 +552,41 @@ with tempfile.TemporaryDirectory() as tmpd:
         ok("asking LLM for revision" not in proc.stderr,
            "e2e: LLM revision loop is skipped",
            detail=f"stderr tail: {proc.stderr[-400:]!r}")
+
+
+# Setup tries more recipe backends only for a repairable failure. A missing
+# prerequisite discovered from its first failed canonical build must use the
+# same exit code as one discovered during an initial scratch build.
+with tempfile.TemporaryDirectory() as tmpd:
+    root = Path(tmpd)
+    src = root / "src"
+    src.mkdir()
+    (src / "meson.build").write_text("project('sampleproj', 'c')\n", encoding="utf-8")
+    recipe = root / "build.sh"
+    recipe.write_text(abs_mod.initial_script("meson", "asan"), encoding="utf-8")
+    failure = root / "failed.log"
+    failure.write_text(
+        "Found pkg-config: NO\n"
+        "ERROR: Dependency lookup for samplelib with method 'pkg-config' "
+        "failed: Pkg-config for machine host machine not found. Giving up.\n",
+        encoding="utf-8",
+    )
+    repaired = root / "repaired.sh"
+    temporary = root / "tmp"
+    temporary.mkdir()
+    proc = subprocess.run(
+        [sys.executable, str(ABS), "--src", str(src), "--out", str(repaired),
+         "--sanitizer", "asan", "--build-system", "meson",
+         "--repair-from", str(recipe), "--failure-log", str(failure)],
+        capture_output=True, text=True, check=False,
+        env={**os.environ, "TMPDIR": str(temporary)},
+    )
+    ok(proc.returncode == 5,
+       "repair: missing host prerequisite exits 5 before backend retry",
+       detail=f"rc={proc.returncode}, stderr={proc.stderr[-400:]!r}")
+    ok(not repaired.exists(), "repair: missing prerequisite writes no recipe")
+    ok(not list(temporary.iterdir()),
+       "repair: a failed run removes its scratch build directory")
 
 
 # ─── alternate configuration helpers ───────────────────────────────

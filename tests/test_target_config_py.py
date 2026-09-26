@@ -1576,6 +1576,37 @@ try:
 finally:
     tc._binary_uses_sanitizer = _saved_uses
 
+# Meson puts dependency builds under subprojects/. A target with only a CLI
+# must not advertise a dependency archive as its harness library.
+meson_dependency_root = TEST_TMPDIR / "meson-subproject-only"
+meson_dependency_build = meson_dependency_root / "build-asan"
+meson_dependency_archive = (
+    meson_dependency_build / "subprojects" / "dependency" / "libdependency.a"
+)
+meson_dependency_archive.parent.mkdir(parents=True)
+meson_dependency_archive.write_bytes(b"!<arch>\n")
+assert_eq(
+    "", tc._detect_sanitizer_lib(meson_dependency_build, meson_dependency_root),
+    "Meson dependency archives are not the target's harness library",
+)
+meson_dependency_toml = meson_dependency_root / "target.toml"
+meson_dependency_toml.write_text(
+    'build_system = "meson"\n'
+    'asan_lib = "build-asan/subprojects/dependency/libdependency.a"\n',
+    encoding="utf-8",
+)
+assert_eq(
+    True, tc.refresh_detected_build_fields(
+        meson_dependency_root, meson_dependency_toml,
+    ),
+    "a regenerated config removes a stale Meson dependency library",
+)
+assert_not_in(
+    'asan_lib = "build-asan/subprojects/dependency/libdependency.a"',
+    meson_dependency_toml.read_text(encoding="utf-8"),
+    "the dependency archive no longer survives regeneration",
+)
+
 assert_in('asan_bin      = "build-asan/Product.app/Contents/MacOS/Product"',
           browser_refresh_toml.read_text(encoding="utf-8"),
           "browser refresh adopts the foreground product executable")

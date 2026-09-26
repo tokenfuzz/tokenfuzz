@@ -1432,13 +1432,14 @@ def _is_canonical_library_name(name: str) -> bool:
 # project's own library or CLI: CMake's CMakeFiles/ (compiler-probe
 # binaries like CMakeDetermineCompilerABI_C.bin, object trees), unit-test
 # frameworks vendored under test(s)/ (Unity, gtest, …), and FetchContent
-# dependency builds under _deps/ or the conventional third_party/ spellings.
+# dependency builds under _deps/, Meson's subprojects/, or the conventional
+# third_party/ spellings.
 # Inclusion criterion: a directory a build system populates with
 # helper/probe/dependency artifacts, not the target's primary output.
 # Structural (no project names), target-agnostic as new projects appear.
 _AUX_BUILD_DIRS = {
     "cmakefiles", "test", "tests", "_deps",
-    "third_party", "third-party", "3rdparty",
+    "third_party", "third-party", "3rdparty", "subprojects",
 }
 
 

@@ -977,7 +977,9 @@ func main() {
 """,
         runner_args=("run", "-race", "{TESTCASE}"),
         runner_env=(
-            "GOFLAGS=-mod=mod",
+            # Workspace mode rejects -mod=mod; readonly also prevents probes
+            # from changing the audited checkout's go.mod or go.sum.
+            "GOFLAGS=-mod=readonly",
             "GORACE=halt_on_error=1",
             "GOCACHE={TARGET_ROOT}/.audit/go-build",
             "GOMODCACHE={TARGET_ROOT}/.audit/go-mod",

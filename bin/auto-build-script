@@ -45,6 +45,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import atexit
 import os
 import platform
 import re
@@ -379,6 +380,10 @@ _COMMAND_NOT_FOUND_RE = re.compile(
     r"(?:^|: )([A-Za-z0-9_.+-]+): (?:command )?not found",
     re.MULTILINE,
 )
+_MESON_PKG_CONFIG_MISSING_RE = re.compile(
+    r"(?m)^.*ERROR: Dependency lookup [^\n]* with method 'pkg-config' failed: "
+    r"Pkg-config for machine [^\n]* not found\. Giving up\.$",
+)
 
 
 def detect_missing_commands(log: str) -> list[str]:
@@ -395,6 +400,10 @@ def detect_missing_commands(log: str) -> list[str]:
         if not cmd or "/" in cmd or cmd in seen:
             continue
         seen.append(cmd)
+    # Meson reports this missing executable through its dependency resolver,
+    # so bash's command-not-found pattern never sees it.
+    if _MESON_PKG_CONFIG_MISSING_RE.search(log) and "pkg-config" not in seen:
+        seen.append("pkg-config")
     return seen
 
 
@@ -1037,6 +1046,10 @@ def main(argv: list[str]) -> int:
         else Path(tempfile.mkdtemp(prefix="auto-build-script-",
                                    dir=os.environ.get("TMPDIR", "/tmp")))
     scratch.mkdir(parents=True, exist_ok=True)
+    if not args.keep_scratch:
+        # die() exits from many failure paths; every one must still remove
+        # the scratch builds or they accumulate under TMPDIR across runs.
+        atexit.register(shutil.rmtree, scratch, ignore_errors=True)
 
     # The configured system wins over detection so the recipe header records
     # what setup will compare it against; a dual-manifest tree otherwise
@@ -1060,8 +1073,6 @@ def main(argv: list[str]) -> int:
         )
         info(f"wrote deterministic initial recipe: {out}")
         print(str(out))
-        if not args.keep_scratch:
-            shutil.rmtree(scratch, ignore_errors=True)
         return 0
 
     if args.widen_from:
@@ -1091,8 +1102,6 @@ def main(argv: list[str]) -> int:
         )
         info(f"widen: wrote {out}")
         print(str(out))
-        if not args.keep_scratch:
-            shutil.rmtree(scratch, ignore_errors=True)
         return 0
 
     repair_path: Path | None = None
@@ -1117,7 +1126,7 @@ def main(argv: list[str]) -> int:
             die(
                 "clean-build failure is a missing toolchain, not a repairable "
                 f"recipe error: {' '.join(missing)}",
-                rc=3,
+                rc=5,
             )
         revised, deterministic = deterministic_recipe_revision(
             script, build_system=build_system, build_log=repair_seed_log,
@@ -1290,8 +1299,6 @@ def main(argv: list[str]) -> int:
     )
     info(f"converged: wrote {out}")
     print(str(out))
-    if not args.keep_scratch:
-        shutil.rmtree(scratch, ignore_errors=True)
     return 0
 
 

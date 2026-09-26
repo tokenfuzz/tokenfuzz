@@ -120,7 +120,7 @@ class MultiLanguageSupportTests(unittest.TestCase):
         python_env = target_config.language_runner_defaults("python")["env"]
         self.assertIn("PYTHONPATH={TARGET_ROOT}:{TARGET_ROOT}/src:{TARGET_ROOT}/lib", python_env)
         go_env = target_config.language_runner_defaults("go")["env"]
-        self.assertIn("GOFLAGS=-mod=mod", go_env)
+        self.assertIn("GOFLAGS=-mod=readonly", go_env)
         self.assertIn("GORACE=halt_on_error=1", go_env)
         self.assertIn("GOCACHE={TARGET_ROOT}/.audit/go-build", go_env)
         self.assertIn("GOMODCACHE={TARGET_ROOT}/.audit/go-mod", go_env)
@@ -469,18 +469,20 @@ class MultiLanguageSupportTests(unittest.TestCase):
         (self.target / "go.mod").write_text(
             "module example.com/probetarget\n\ngo 1.22\n", encoding="utf-8",
         )
+        (self.target / "go.work").write_text(
+            "go 1.22\n\nuse .\n", encoding="utf-8",
+        )
         (self.target / "target.go").write_text(
             'package probetarget\n\nfunc Marker() string { return "TARGET_REACHED" }\n',
             encoding="utf-8",
         )
+        runner_env = target_config.language_runner_defaults("go")["env"]
         scratch = self.tree(
             "go-module",
             'target = "multilang"\nbuild_system = "go"\n'
             '[sanitizer]\nenabled = []\n'
             '[runner]\nbin = "go"\nargs = ["run", "{TESTCASE}"]\n'
-            'env = ["GOFLAGS=-mod=mod", '
-            '"GOCACHE={TARGET_ROOT}/.audit/go-build", '
-            '"GOMODCACHE={TARGET_ROOT}/.audit/go-mod"]\n',
+            f"env = {json.dumps(runner_env)}\n",
         )
         testcase = self.make_testcase(
             scratch / "route.go",

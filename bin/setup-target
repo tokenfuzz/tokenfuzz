@@ -1508,6 +1508,15 @@ class Setup:
                                     "--failure-log", str(result.log_path),
                                     "--max-iters", "3",
                                 ], env=environment, check=False)
+                                if completed.returncode == 5:
+                                    # A missing host prerequisite cannot be
+                                    # repaired by asking another model for a
+                                    # different build recipe.
+                                    log(
+                                        "bootstrap: host prerequisite missing; "
+                                        "skipping remaining recipe backends"
+                                    )
+                                    break
                                 if completed.returncode or not repaired.is_file():
                                     continue
                                 repaired_result = build_materialize.materialize(

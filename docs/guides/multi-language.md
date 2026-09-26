@@ -112,7 +112,7 @@ The other ecosystems differ only in the `[runner]` fields:
 | Ecosystem | `build_system` | `bin` | `args` | Notable `env` |
 | --- | --- | --- | --- | --- |
 | Python | `python` | `python3` | `["{TESTCASE}"]` | `PYTHONDEVMODE=1`, `PYTHONPATH={TARGET_ROOT}:{TARGET_ROOT}/src:{TARGET_ROOT}/lib` |
-| Go | `go` | `go` | `["run", "-race", "{TESTCASE}"]` | module and build caches under `{TARGET_ROOT}/.audit`, `GOFLAGS=-mod=mod`, `GORACE=halt_on_error=1` |
+| Go | `go` | `go` | `["run", "-race", "{TESTCASE}"]` | module and build caches under `{TARGET_ROOT}/.audit`, `GOFLAGS=-mod=readonly`, `GORACE=halt_on_error=1` |
 | Rust | `cargo` | `cargo` | An unambiguous declared binary uses `cargo run`; a library or virtual workspace uses direct `.rs` testcases | `CARGO_HOME={TARGET_ROOT}/.audit/cargo-home`, `CARGO_NET_OFFLINE=true` |
 | Swift library | `swift` | `swift` | `["{TESTCASE}"]` | module cache under `{TARGET_ROOT}/.audit` |
 | Ruby | `bundler` | newest discovered `ruby` | `["{TESTCASE}"]` | target `RUBYLIB` and vendored Bundler environment |
