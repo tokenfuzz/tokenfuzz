@@ -5072,6 +5072,19 @@ def reject_availability_only(
     return kept
 
 
+def _hold_pending(directories: list[Path], detail: str) -> None:
+    """Say why a finding this pass could not judge is still pending.
+
+    Without a receipt a wall-cut finding read as never reviewed, and indexes
+    could not tell it from one no pass had reached. The next pass revisits it
+    from its vote caches either way.
+    """
+    for directory in directories:
+        validation_receipt.write(
+            directory, kind="finding", state="pending", detail=detail,
+        )
+
+
 @_in_pinned_session
 def validate_find_gate(
     results_dir: str | os.PathLike[str],
@@ -5177,6 +5190,7 @@ def validate_find_gate(
     for start in range(0, len(directories), quality_group_size):
         group = directories[start:start + quality_group_size]
         if _deadline_expired(deadline):
+            _hold_pending(group, "wall reached before quality review")
             counts["pending"] += len(group)
             continue
         # Post-cell measurement may finish a group it admitted before its
@@ -5217,6 +5231,10 @@ def validate_find_gate(
             # open; an admitted group uses group_deadline and therefore finishes
             # post-cell, while the in-run caller retains its hard deadline.
             if disposition_start and _deadline_expired(deadline):
+                _hold_pending(
+                    accepted_quality[disposition_start:],
+                    "wall reached before trigger review",
+                )
                 counts["pending"] += len(accepted_quality) - disposition_start
                 break
             # Converge before the trigger vote binds a receipt to the report,
@@ -5290,6 +5308,7 @@ def validate_find_gate(
                     # stale keyed output stays pending for a later bounded pass
                     # instead of immediately spawning a serial per-finding
                     # validator.
+                    _hold_pending([directory], "trigger review returned no usable vote")
                     status = "pending"
                 else:
                     status = _finalize_accepted_finding(

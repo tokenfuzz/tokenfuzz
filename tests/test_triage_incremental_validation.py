@@ -1148,6 +1148,15 @@ Generated score text.
         # The wall still stops the run: later groups are never opened.
         self.assertLess(len(finalized), len(directories), len(finalized))
         self.assertGreater(counts["pending"], 0, counts)
+        # A finding the wall cut off says so; without a receipt it read as
+        # one no pass had ever reached.
+        unfinalized = [d for d in directories if d not in finalized]
+        self.assertTrue(unfinalized)
+        for directory in unfinalized:
+            receipt = validation_receipt.read_current(directory)
+            self.assertIsNotNone(receipt, directory.name)
+            self.assertEqual(receipt["state"], "pending")
+            self.assertIn("wall reached", receipt["detail"])
         # Every finding the gate saw is accounted for exactly once, whichever
         # group it landed in.
         self.assertEqual(
