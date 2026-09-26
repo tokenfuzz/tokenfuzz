@@ -59,6 +59,11 @@ _GO_RACE_ACCESS_RE = re.compile(
 )
 _GO_RACE_FUNC_RE = re.compile(r"^\s+(?P<func>\S.*?)\(\)\s*$")
 _GO_RACE_LOC_RE = re.compile(r"^\s+(?P<loc>\S+\.go:\d+)(?:\s+\+0x[0-9a-fA-F]+)?\s*$")
+# A fatal-error traceback: `goroutine N [running]:`, then `pkg.func(args)`
+# lines each followed by an indented `file.go:line +0x.. [fp= sp= pc=]`.
+_GO_TRACE_HEAD_RE = re.compile(r"^goroutine \d+\b.*\[running\]:\s*$")
+_GO_TRACE_FUNC_RE = re.compile(r"^(?P<func>\S.*?)\([^()]*\)\s*$")
+_GO_TRACE_LOC_RE = re.compile(r"^\s+(?P<loc>\S+\.go:\d+)(?:\s.*)?$")
 STATE_STOP_MARKERS = (
     "Direct leak of",
     "Uninitialized value was stored to memory at",
@@ -338,7 +343,7 @@ def is_ignored_frame(frame: StackFrame) -> bool:
     # `.*/googletest/`, …) still fire through `raw`; and `raw` always starts
     # with `#<n> 0x…`, so the function-name `^` rules can never false-match it.
     function = frame.function
-    if frame.raw.startswith("go-race ") and function.startswith("main."):
+    if frame.raw.startswith(("go-race ", "go-trace ")) and function.startswith("main."):
         # In Go, `main.` is the application package prefix, not the C/C++
         # process entrypoint that ClusterFuzz's `^main` rule targets. Strip it
         # so a genuine `main.<func>` race frame is not dropped as boilerplate.
@@ -392,6 +397,38 @@ def iter_go_race_frames(text: str) -> list[StackFrame]:
     return frames
 
 
+def iter_go_traceback_frames(text: str) -> list[StackFrame]:
+    """Frames of the first faulting goroutine in a Go fatal-error traceback.
+
+    A confirmation transcript repeats the traceback once per run; the first
+    running goroutine is run 1's. Runtime frames are dropped by the shared
+    ignore rules like any other runtime's.
+    """
+    frames: list[StackFrame] = []
+    lines = text.splitlines()
+    active = False
+    for pos, line in enumerate(lines):
+        if _GO_TRACE_HEAD_RE.match(line):
+            if active:
+                break
+            active = True
+            continue
+        if not active:
+            continue
+        if not line.strip() and frames:
+            break
+        func = _GO_TRACE_FUNC_RE.match(line)
+        loc = _GO_TRACE_LOC_RE.match(lines[pos + 1]) if pos + 1 < len(lines) else None
+        if func and loc:
+            frames.append(StackFrame(
+                index=len(frames),
+                function=func.group("func") + "()",
+                location=loc.group("loc"),
+                raw=f"go-trace {line.strip()} {loc.group('loc')}",
+            ))
+    return frames
+
+
 def iter_asan_frames(text: str) -> list[StackFrame]:
     frames: list[StackFrame] = []
     fallback_frames: list[StackFrame] = []
@@ -412,7 +449,10 @@ def iter_asan_frames(text: str) -> list[StackFrame]:
             break
         if frame is not None:
             frames.append(frame)
-    return frames or fallback_frames or iter_go_race_frames(text)
+    return (
+        frames or fallback_frames or iter_go_race_frames(text)
+        or iter_go_traceback_frames(text)
+    )
 
 
 def interesting_frames(text: str, want: int = 5) -> list[StackFrame]:

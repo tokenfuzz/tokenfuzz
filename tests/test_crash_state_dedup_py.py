@@ -185,6 +185,27 @@ class CrashStateDedupTests(unittest.TestCase):
         self.assertEqual(self.file("2", "b", trace(kind="heap-use-after-free"))[0], "FILED")
         self.assertEqual(self.file("2", "c", trace(line=25))[0], "FILED")
 
+    def test_go_fault_repeats_share_one_state_and_distinct_sites_do_not(self) -> None:
+        # Go fatal faults had no crash state, so every repeat of one fault
+        # filed and was reviewed as a new crash.
+        def go_fault(address: str, line: int) -> str:
+            return (
+                f"unexpected fault address {address}\nfatal error: fault\n"
+                f"[signal SIGSEGV: segmentation violation code=0x2 addr={address} pc=0x1]\n\n"
+                "goroutine 1 gp=0x14000002380 m=0 mp=0x1 [running]:\n"
+                "runtime.throw({0x1, 0x5})\n\t/go/src/runtime/panic.go:1101 +0x38 fp=0x1 sp=0x2 pc=0x3\n"
+                "example.com/sampleproj/store.(*pages).read(0x1400, 0x1)\n"
+                f"\t/src/store/pages.go:{line} +0x5c fp=0x1 sp=0x2 pc=0x3\n"
+                "example.com/sampleproj/store.Open()\n\t/src/store/open.go:40 +0xa0\n"
+                "main.main()\n\t/results/scratch-1/H-1.go:9 +0x1\n"
+            )
+        first = crash_bundle.crash_state(go_fault("0x110390000", 270))
+        self.assertIsNotNone(first)
+        self.assertEqual(first, crash_bundle.crash_state(go_fault("0x2203a4000", 270)))
+        self.assertNotEqual(first, crash_bundle.crash_state(go_fault("0x110390000", 275)))
+        self.assertIsNone(crash_bundle.crash_state(go_fault("0x10", 270)),
+                          "a null-page fault is not credited and gets no state")
+
     def test_unsymbolized_frames_keep_their_module_offsets(self) -> None:
         # Scrubbing the offset as an address made every raw frame in one
         # library the same frame, so a second, unrelated crash there was

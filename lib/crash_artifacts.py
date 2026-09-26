@@ -14,6 +14,7 @@ from typing import Iterable, Optional
 
 import stack_frames
 import report_identity
+import verdict
 
 
 ARTIFACT_EXACT = {
@@ -416,6 +417,13 @@ def sanitizer_fault_key(text: str) -> tuple[str, str] | None:
         r"^WARNING: DATA RACE$", diagnostic, re.MULTILINE
     ):
         return sanitizer, "data-race"
+    # Go's runtime reports that probe credits as crashes; without a key their
+    # repeats were never recognized as the same crash.
+    if sanitizer in {"race", ""}:
+        if verdict.go_memory_fault(text):
+            return sanitizer or "go", "go-fault"
+        if re.search(r"^fatal error: checkptr:", text, re.MULTILINE):
+            return sanitizer or "go", "go-checkptr"
     return None
 
 
