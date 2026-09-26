@@ -3277,9 +3277,10 @@ def replay_unmeasured(directory: Path) -> bool:
 
 # Pinned session variables live in the process environment, which concurrent
 # gate calls share (a sealed background sweep beside the barrier's triage).
-# Each variable is held while any call needs it and restored after the last.
+# One results tree holds it at a time; calls on that tree share the hold and
+# the last to finish restores what the caller had.
 _PINNED_LOCK = threading.Lock()
-_PINNED: dict[str, list] = {}  # variable -> [value, previous, holders]
+_PINNED_TREE: dict = {}
 _THREAT_MODEL_ENV = "TARGET_ATTACKER_CONTROLS_CSV"
 
 
@@ -3292,46 +3293,41 @@ def pinned_session(results_dir: str | os.PathLike[str]) -> Iterator[None]:
     rejected triggers the target's pinned controls include. The tree's threat
     model is authoritative; its other variables only fill what the caller
     left unset, since a benchmark drain supplies its own checkout and digest.
+    Two trees cannot be gated at once in one process: whichever set the
+    environment first would silently decide the other's source root.
     """
-    held: list[str] = []
     pinned = target_config.pinned_session_environment(results_dir)
+    if not pinned:
+        yield
+        return
+    tree = Path(results_dir).resolve()
     with _PINNED_LOCK:
-        entry = _PINNED.get(_THREAT_MODEL_ENV)
-        if (
-            entry is not None and _THREAT_MODEL_ENV in pinned
-            and entry[0] != pinned[_THREAT_MODEL_ENV]
-        ):
-            # Checked before anything is held, so a refusal leaves no hold.
-            raise RuntimeError(
-                "results trees with different threat models cannot be gated "
-                "at once in one process"
-            )
-        for key, value in pinned.items():
-            entry = _PINNED.get(key)
-            if entry is not None:
-                if entry[0] != value:
-                    continue
-                entry[2] += 1
-            elif key == _THREAT_MODEL_ENV or not os.environ.get(key):
-                _PINNED[key] = [value, os.environ.get(key), 1]
-                os.environ[key] = value
-            else:
-                continue
-            held.append(key)
+        if _PINNED_TREE:
+            if _PINNED_TREE["tree"] != tree:
+                raise RuntimeError(
+                    f"cannot gate {tree} while {_PINNED_TREE['tree']} is being "
+                    "gated in this process: both would share one environment"
+                )
+            _PINNED_TREE["holders"] += 1
+        else:
+            restore: dict[str, str | None] = {}
+            for key, value in pinned.items():
+                if key == _THREAT_MODEL_ENV or not os.environ.get(key):
+                    restore[key] = os.environ.get(key)
+                    os.environ[key] = value
+            _PINNED_TREE.update(tree=tree, holders=1, restore=restore)
     try:
         yield
     finally:
         with _PINNED_LOCK:
-            for key in held:
-                entry = _PINNED[key]
-                entry[2] -= 1
-                if entry[2]:
-                    continue
-                del _PINNED[key]
-                if entry[1] is None:
-                    os.environ.pop(key, None)
-                else:
-                    os.environ[key] = entry[1]
+            _PINNED_TREE["holders"] -= 1
+            if not _PINNED_TREE["holders"]:
+                for key, previous in _PINNED_TREE["restore"].items():
+                    if previous is None:
+                        os.environ.pop(key, None)
+                    else:
+                        os.environ[key] = previous
+                _PINNED_TREE.clear()
 
 
 def _in_pinned_session(gate):

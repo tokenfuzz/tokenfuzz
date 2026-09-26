@@ -3289,24 +3289,23 @@ Generated score text.
             self.assertEqual(os.environ["TARGET_ATTACKER_CONTROLS_CSV"], "bytes,race")
             second.__exit__(None, None, None)
             self.assertEqual(os.environ["TARGET_ATTACKER_CONTROLS_CSV"], "")
-            # A tree with another threat model cannot share the process
-            # environment; refusing it must leave nothing held.
+            # Another tree cannot share the process environment even with the
+            # same threat model: the first would decide its source root.
             other = self.root / "other-results"
             other.mkdir()
             other_config = other / ".target.toml"
-            other_config.write_text(
-                'target = "sampleproj"\n[threat_model]\nattacker_controls = ["bytes"]\n',
-                encoding="utf-8",
-            )
+            other_config.write_text(config.read_text(encoding="utf-8"), encoding="utf-8")
             (other / ".session-env").write_text(
-                f"RESULTS_DIR={other}\nTARGET_SLUG=sampleproj\n"
+                f"RESULTS_DIR={other}\nTARGET_ROOT={other}\nTARGET_SLUG=sampleproj\n"
                 f"TARGET_CONFIG_SHA256={hashlib.sha256(other_config.read_bytes()).hexdigest()}\n",
                 encoding="utf-8",
             )
             with triage.pinned_session(self.root):
                 with self.assertRaises(RuntimeError):
                     triage.pinned_session(other).__enter__()
-            self.assertEqual(triage._PINNED, {})
+            self.assertEqual(triage._PINNED_TREE, {})
+            with triage.pinned_session(other):
+                self.assertEqual(os.environ["TARGET_ATTACKER_CONTROLS_CSV"], "bytes,race")
 
     def test_publication_rejection_is_requeued_only_when_its_review_is_stale(self) -> None:
         rejected = self.root / "findings-rejected"
