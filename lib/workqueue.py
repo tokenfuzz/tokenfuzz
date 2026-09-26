@@ -900,6 +900,7 @@ class Context:
     _sanitizer_object_cache: tuple[dict[str, set[str]], int] | None = field(
         default=None, init=False, repr=False,
     )
+    _go_target_cache: list = field(default_factory=list, init=False, repr=False)
 
 
 def now_iso() -> str:
@@ -1642,16 +1643,54 @@ def _probeable_alternate_builds(ctx: Context) -> dict[str, str]:
     return ready
 
 
-def _go_build_target() -> tuple[str, str, set[str], set[str]] | None:
-    """Return Go's selected target and known filename suffix tags, if available."""
+def _go_build_target(ctx: Context) -> tuple[str, str, set[str], set[str]] | None:
+    """Return the probe runner's Go target and known filename suffix tags.
+
+    Asked of the configured runner under its own [runner].env, since a pinned
+    GOOS or GOARCH decides which files a probe can build; the ambient `go`
+    answers only when no Go runner is configured.
+    """
+    if ctx._go_target_cache:
+        return ctx._go_target_cache[0]
+    target = _go_target_from_runner(ctx)
+    ctx._go_target_cache.append(target)
+    return target
+
+
+def _go_target_from_runner(ctx: Context) -> tuple[str, str, set[str], set[str]] | None:
+    import runner_preflight  # lazy: see import note at top of file
+    import sanitizer_run  # lazy: see import note at top of file
+    import target_config  # lazy: see import note at top of file
+
+    go, environment = "go", dict(os.environ)
+    config = None
+    # This tree's own pinned session only: an upward search could adopt
+    # another target's runner.
+    if (ctx.results_dir / ".session-env").is_file():
+        config = target_config.Config(
+            target_root=str(ctx.target_root), results_dir=str(ctx.results_dir),
+        )
+        try:
+            target_config.load_toml_into(
+                config, target_config.target_toml_for_session_dir(ctx.results_dir),
+            )
+        except (OSError, ValueError, target_config.PinnedConfigError):
+            config = None
+    if config is not None and Path(config.runner_bin).name == "go":
+        go = str(runner_preflight.runner_path(config))
+        for entry in config.runner_env:
+            key, _, value = sanitizer_run.expand_runner_value(
+                entry, config, "race",
+            ).partition("=")
+            environment[key] = value
     try:
         selected = subprocess.run(
-            ["go", "env", "GOOS", "GOARCH"], capture_output=True, text=True,
-            timeout=5, check=False,
+            [go, "env", "GOOS", "GOARCH"], capture_output=True, text=True,
+            timeout=5, check=False, env=environment,
         )
         supported = subprocess.run(
-            ["go", "tool", "dist", "list"], capture_output=True, text=True,
-            timeout=5, check=False,
+            [go, "tool", "dist", "list"], capture_output=True, text=True,
+            timeout=5, check=False, env=environment,
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -1694,7 +1733,7 @@ def annotate_card_buildability(ctx: Context, cards: list[dict]) -> list[dict]:
     """Attach advisory compilation evidence without removing source-review work."""
     object_index, build_count = _sanitizer_object_index(ctx)
     alternates: dict[str, str] | None = None
-    go_target = _go_build_target() if any(
+    go_target = _go_build_target(ctx) if any(
         Path(str(card.get("file", ""))).suffix.lower() == ".go" for card in cards
     ) else None
     out: list[dict] = []

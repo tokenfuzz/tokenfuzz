@@ -1529,6 +1529,33 @@ class WorkQueueTests(unittest.TestCase):
             workqueue._built_first(annotated[0]),
         )
 
+    def test_go_platform_comes_from_the_configured_runner(self) -> None:
+        # Probes build with the runner's Go under its [runner].env; the
+        # ambient `go` can name another platform and demote runnable cards.
+        fake_go = self.root / "go"
+        fake_go.write_text(
+            '#!/bin/sh\nif [ "$1" = env ]; then printf "%s\\n%s\\n" "$GOOS" "$GOARCH"; '
+            'else printf "linux/amd64\\ndarwin/arm64\\n"; fi\n',
+            encoding="utf-8",
+        )
+        fake_go.chmod(0o755)
+        self.results.mkdir(parents=True, exist_ok=True)
+        config = self.results / ".target.toml"
+        config.write_text(
+            'target = "sample"\nbuild_system = "go"\n[runner]\n'
+            f'bin = "{fake_go}"\nargs = ["run", "{{TESTCASE}}"]\n'
+            'env = ["GOOS=linux", "GOARCH=amd64"]\n',
+            encoding="utf-8",
+        )
+        (self.results / ".session-env").write_text(
+            f"RESULTS_DIR={self.results}\nTARGET_ROOT={self.target}\nTARGET_SLUG=sample\n"
+            f"TARGET_CONFIG_SHA256={hashlib.sha256(config.read_bytes()).hexdigest()}\n",
+            encoding="utf-8",
+        )
+        target = workqueue._go_build_target(self.ctx)
+        self.assertIsNotNone(target)
+        self.assertEqual(target[:2], ("linux", "amd64"))
+
     def test_go_filename_constraints_follow_go_build(self) -> None:
         # go/build ignores the segment before the first underscore, so a bare
         # `linux.go` or `linux_arm64.go` is built on darwin/arm64.
