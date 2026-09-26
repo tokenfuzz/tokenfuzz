@@ -101,7 +101,8 @@ sanitizer found an error.
   cleanly. The row carries an `execution_failure_class` (`loader`, `usage`,
   `input-rejected`, `aborted`, `unverified-exit`, or `exit`).
 - `NO_EXEC`: no target-execution evidence was established, including a
-  launch the sanitizer budget refused (`budget-exhausted`).
+  launch the sanitizer budget refused (`budget-exhausted`) and a crash the
+  route reproduces on an empty input (`input-independent`).
 - `TIMEOUT`: the runner reached its reserved wall-clock deadline; this is
   unresolved evidence, never a clean run.
 - `CRASH`: a configured sanitizer or runner diagnostic was observed.

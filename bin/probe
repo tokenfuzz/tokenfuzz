@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import shlex
 import shutil
 import subprocess
@@ -52,6 +53,13 @@ MODE_MATRIX = {
     "runner": {"generic"},
 }
 COMPILE_SANITIZERS = {"asan": "address", "ubsan": "undefined", "msan": "memory", "tsan": "thread"}
+#: What a control run must not touch: the agent's sanitizer budget, its
+#: tried-input and coverage ledgers, the probe's run count, and the gate.
+_CONTROL_UNSET_ENV = frozenset({
+    "SANITIZER_RUN_COUNTER_FILE", "ASAN_RUN_COUNTER_FILE",
+    "SANITIZER_RUN_BUDGET", "ASAN_RUN_BUDGET", "SAN_OUTPUT_FILE",
+    "TRIED_INPUTS_LOG", "HITS_LOG_PATH", "SANITIZER_RUNS_ACTUAL_FILE", "WANT",
+})
 SCRIPT_EXTENSIONS = {"js", "mjs", "cjs", "ts", "tsx", "jsx", "py", "rb", "php", "pl", "pm", "r", "sh", "bash", "zsh", "kts"}
 HEADER_RE = {
     "target": re.compile(r"^[^A-Za-z]*TARGET:\s*(.+?)\s*(?:-->|\*/)?\s*$", re.M),
@@ -351,6 +359,23 @@ def prepare_exec_testcase(testcase: Path, config: target_config.Config, agent: s
                 output.write(line)
     destination.chmod(testcase.stat().st_mode & 0o777)
     return destination
+
+
+def _empty_twin(testcase: Path) -> Path | None:
+    """A new empty file beside `testcase` whose path has the same length."""
+    width = len(testcase.name) - len(testcase.suffix) - 1
+    for _ in range(8):
+        twin = testcase.with_name(
+            f".{secrets.token_hex(max(1, width))[:max(1, width)]}{testcase.suffix}"
+        )
+        try:
+            twin.open("x").close()
+            return twin
+        except FileExistsError:
+            continue
+        except OSError:
+            return None
+    return None
 
 
 def resolve_executable(value: str, config: target_config.Config) -> str:
@@ -1130,6 +1155,7 @@ class Probe:
         sanitizer_lib.hold_build(self.sanitizer, self.config.target_root)
         self.harness_source: Path | None = None
         self.build_kind = ""
+        self.no_exec_class = ""
         self.repro_args = list(self.args.args)
         self.environment = self._environment()
         self.command = self._command()
@@ -1558,6 +1584,7 @@ class Probe:
         self._cap_output()
         self._publish_latest_output()
         probe_verdict = self._reject_foreign_image(probe_verdict)
+        probe_verdict = self._reject_input_independent(probe_verdict)
         self._write_internal_differential_result(probe_verdict)
         print(f"[probe] verdict={probe_verdict}")
         self.duplicate_of = self._filed_state_owner(probe_verdict)
@@ -1636,6 +1663,79 @@ class Probe:
             "leaves evidence about that binary instead.",
             file=sys.stderr,
         )
+        return "NO_EXEC"
+
+    def _reject_input_independent(self, probe_verdict: str) -> str:
+        """Downgrade a crash the same route reproduces on an empty input.
+
+        A binary that faults while it starts up crashes under any input: one
+        campaign's MLIR CLI recorded ten CRASH verdicts from a dialect
+        registration fault that ran before any operation was parsed. Like a
+        foreign image, that CRASH would already count as a measurement. So
+        run the command once more on an empty file (the startup-crash check
+        fuzzing infrastructure runs on a build): an identical crash state
+        shows the testcase's content never mattered. The file sits beside
+        the testcase under a name of the same length: that fault moved with
+        argv layout, and a shorter path met a different one. Any other
+        outcome, or a state that cannot be read, keeps the CRASH. A testcase
+        built into the executable (HARNESS or a direct build) is the program
+        itself, so emptying its input would not remove it.
+        """
+        testcase = str(self.exec_testcase)
+        if (
+            probe_verdict != "CRASH" or self.mode != "generic" or self.build_kind
+            or not (
+                self.environment.get("ASAN_GENERIC_SKIP_TESTCASE") == "0"
+                or any(testcase in arg for arg in self.command[4:])
+            )
+        ):
+            return probe_verdict
+        try:
+            state = crash_bundle.crash_state(
+                self.output.read_text(encoding="utf-8", errors="replace"),
+            )
+        except OSError:
+            return probe_verdict
+        if state is None:
+            return probe_verdict
+        empty = _empty_twin(self.exec_testcase)
+        if empty is None:
+            return probe_verdict
+        # A harness check, not an agent run: no budget, ledger or gate.
+        environment = {
+            key: value for key, value in self.environment.items()
+            if key not in _CONTROL_UNSET_ENV
+        }
+        try:
+            with tempfile.TemporaryDirectory(prefix="probe-control-") as scratch:
+                output = Path(scratch) / "control.asan.txt"
+                environment.update(
+                    ASAN_OUTPUT_FILE=str(output), SANITIZER_RUNS="1",
+                    SKIP_COVERAGE_GATE="1",
+                )
+                subprocess.run(
+                    [arg.replace(testcase, str(empty)) for arg in self.command],
+                    env=environment, stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    check=False,
+                )
+                control = crash_bundle.crash_state(
+                    output.read_text(encoding="utf-8", errors="replace"),
+                ) if output.is_file() else None
+        finally:
+            empty.unlink(missing_ok=True)
+        if control != state:
+            return probe_verdict
+        print(
+            "[probe] NO_EXEC class=input-independent: the same route crashed "
+            "with an identical crash state on an empty input, so this "
+            "diagnostic does not depend on the testcase and its content was "
+            "never shown to run. The output keeps it as route evidence. Make "
+            "the route start cleanly (a runtime option, another build, or CLI "
+            "flags after --), then probe again.",
+            file=sys.stderr,
+        )
+        self.no_exec_class = "input-independent"
         return "NO_EXEC"
 
     def _property_violation(self, returncode: int) -> bool:
@@ -1857,6 +1957,8 @@ class Probe:
                 "need execution."
             )
             reason = f"{reason} class=budget-exhausted".strip()
+        elif probe_verdict == "NO_EXEC" and self.no_exec_class:
+            reason = f"{reason} class={self.no_exec_class}".strip()
         coverage, frame = verdict_lib.coverage_outcome(self.output)
         self._append_state("add-run", workqueue.add_run, argparse.Namespace(
             agent=self.agent,

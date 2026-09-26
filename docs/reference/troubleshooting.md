@@ -136,6 +136,13 @@ A run refused by the per-iteration sanitizer budget is a `NO_EXEC` with
 class `budget-exhausted`, not an `EXEC_FAIL`; it clears at the next
 iteration.
 
+A crash the same route reproduces with an identical crash state on an
+empty input is a `NO_EXEC` with class `input-independent`: the binary
+faults whatever it reads, usually while starting up, so the testcase is
+not evidence. The saved output keeps the diagnostic. Make the route start
+cleanly (a runtime option such as an `ASAN_OPTIONS` entry, another build,
+or CLI flags after `--`), then probe again.
+
 ## Triage rejects a crash
 
 Open the rejected index in a browser:

@@ -220,6 +220,8 @@ class BuildConfigTests(unittest.TestCase):
             alternate.parent.mkdir(parents=True)
             alternate.write_text(
                 "#!/bin/sh\n"
+                # Crashes on its input, not on every start.
+                "[ -s \"$1\" ] || exit 0\n"
                 "echo TESTCASE_EXECUTED\n"
                 "echo 'ERROR: AddressSanitizer: heap-buffer-overflow' >&2\n"
                 f"echo '    #0 0x1 in app_parse {source}:1' >&2\n"
