@@ -1103,7 +1103,14 @@ class Probe:
             os.environ.get("_TOKENFUZZ_PRIMARY_DIFFERENTIAL_OUTPUT", "")
             if os.environ.get("_TOKENFUZZ_PRIMARY_DIFFERENTIAL") == "1" else ""
         )
-        self.output = Path(internal_output) if internal_output else default_output
+        # Each run keeps its own output, since its state row points there and
+        # a later probe of the same testcase must not rewrite that evidence.
+        # The conventional name follows the newest finished run.
+        self.latest_output = None if internal_output else default_output
+        self.output = Path(internal_output) if internal_output else default_output.with_name(
+            f"{default_output.name.removesuffix('.asan.txt')}"
+            f".run-{os.getpid()}-{time.time_ns()}.asan.txt"
+        )
         self.actual_runs_path = self.output.with_name(
             f".{self.output.name}.runs-{os.getpid()}-{time.time_ns()}"
         )
@@ -1243,6 +1250,7 @@ class Probe:
 
     def _environment(self) -> dict[str, str]:
         environment = dict(os.environ)
+        environment.pop("TOKENFUZZ_TARGET_BIN", None)
         environment.update({
             "RESULTS_DIR": self.config.results_dir, "TARGET_ROOT": self.config.target_root,
             "TARGET_SLUG": self.config.slug, "TARGET_REV": self.config.target_rev,
@@ -1253,6 +1261,9 @@ class Probe:
             "SANITIZER_RUNS": str(sanitizer_run_count(self.args, environment)),
             "SANITIZER_RUNS_ACTUAL_FILE": str(self.actual_runs_path),
         })
+        configured_bin = self.config.sanitizer_bin(self.sanitizer)
+        if configured_bin:
+            environment["TOKENFUZZ_TARGET_BIN"] = self.config.resolve_path(configured_bin)
         self.actual_runs_path.unlink(missing_ok=True)
         environment["PROBE_BUILD_CONFIG_SELECTED"] = (
             self.selected_build_config.config_id if self.selected_build_config else "primary"
@@ -1341,6 +1352,12 @@ class Probe:
                 "Swift library target has no binary for opaque input; write a "
                 "direct .swift public-API testcase, or a `// HARNESS: <name>.swift` "
                 "driver beside the input, and run it with bin/probe"
+            )
+        elif self._direct_interpreter_cannot_run_source():
+            raise ValueError(
+                f"configured direct interpreter {self.config.runner_bin} cannot execute "
+                f"{self.exec_testcase.suffix.lower()} testcase source; configure a compatible "
+                "runner or a supported HARNESS driver"
             )
         elif self._runs_java() and self.exec_testcase.suffix.lower() == ".java":
             module_args = languages.java_probe_runner_args(
@@ -1487,6 +1504,21 @@ class Probe:
             and Path(self.config.runner_bin).name == "java"
         )
 
+    def _direct_interpreter_cannot_run_source(self) -> bool:
+        # A direct interpreter runner would execute native testcase source as
+        # its own language and could report a false CLEAN or syntax failure.
+        if not self._can_use_runner() or list(self.config.runner_args) != ["{TESTCASE}"]:
+            return False
+        source = languages.for_harness_ext(self.exec_testcase.suffix)
+        if source is None or source.interpreted:
+            return False
+        runner = Path(self.config.runner_bin).name
+        return any(
+            language.interpreted and language.runner_bin
+            and Path(language.runner_bin).name == runner
+            for language in languages.LANGUAGES
+        )
+
     def _can_use_runner(self) -> bool:
         return bool(self.config.runner_bin and (self.sanitizer in {"runner", "race"} or not self.config.sanitizer_bin(self.sanitizer)))
 
@@ -1524,6 +1556,7 @@ class Probe:
         self.elapsed_seconds = max(0.0, time.monotonic() - started)
         self.environment["SANITIZER_RUNS"] = str(self._actual_sanitizer_runs())
         self._cap_output()
+        self._publish_latest_output()
         probe_verdict = self._reject_foreign_image(probe_verdict)
         self._write_internal_differential_result(probe_verdict)
         print(f"[probe] verdict={probe_verdict}")
@@ -1531,6 +1564,18 @@ class Probe:
         self._record_state(probe_verdict)
         self._file_crash(probe_verdict)
         return 0 if probe_verdict == "PROPERTY" else result
+
+    def _publish_latest_output(self) -> None:
+        """Point `<testcase>.asan.txt` at this run's output, atomically."""
+        if self.latest_output is None or not self.output.is_file():
+            return
+        temporary = self.latest_output.with_name(
+            f".{self.latest_output.name}.{os.getpid()}.tmp"
+        )
+        # A copy, not a link: a direct runner call writes the conventional
+        # name in place and must not rewrite this run's evidence through it.
+        shutil.copy2(self.output, temporary)
+        os.replace(temporary, self.latest_output)
 
     def _actual_sanitizer_runs(self) -> int:
         try:

@@ -67,8 +67,12 @@ are discovered by walking up to `output/<slug>/<backend>/results/.session-env`.
 ```
 bin/probe "${RESULTS_DIR}/scratch-N/tc.html"               # 1 run (exploration)
 bin/probe --confirm "${RESULTS_DIR}/scratch-N/tc.html"     # 5 runs (after first crash)
-bin/probe "${RESULTS_DIR}/scratch-N/tc.xml" -- 8 100       # trailing args go to the harness
+bin/probe "${RESULTS_DIR}/scratch-N/tc.xml" -- 8 100       # trailing args go to the harness or native CLI
 ```
+
+For a native CLI, pass any flag needed to reach the named code after `--`
+(for example a conversion pass). Use the same flags with `--confirm`; a
+parse-only coverage MISS cannot discard a conversion-path hypothesis.
 
 Direct `.swift` and `.rs` testcases are package harnesses: `bin/probe`
 compiles them against exported libraries even when `[runner].args` only

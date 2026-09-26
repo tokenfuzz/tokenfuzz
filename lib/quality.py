@@ -243,6 +243,18 @@ def _file_has_verified_asan(path: str) -> bool:
     return verified
 
 
+# bin/probe keeps each run's own output beside the testcase's conventional
+# `<testcase>.asan.txt`, which always shows the newest run. Only the
+# conventional name speaks for the testcase; the per-run copies are history.
+_RUN_OUTPUT_RE = re.compile(r"\.run-\d+-\d+\.asan\.txt$")
+
+
+def _is_testcase_output(lower_name: str) -> bool:
+    return (
+        lower_name.endswith(".asan.txt") and not _RUN_OUTPUT_RE.search(lower_name)
+    ) or lower_name.startswith(("asan_output", "asan-output"))
+
+
 def count_verified_sanitizer_runs(directory: str) -> int:
     if not os.path.isdir(directory):
         return 0
@@ -257,7 +269,7 @@ def count_verified_sanitizer_runs(directory: str) -> int:
                 continue
             name = entry.name
             lower = name.lower()
-            if lower.endswith(".asan.txt") or lower.startswith(("asan_output", "asan-output")):
+            if _is_testcase_output(lower):
                 if _file_has_verified_asan(entry.path):
                     n += 1
     return n
@@ -326,7 +338,7 @@ def scan_scratch(directory: str) -> tuple[int, list[str], list[str]]:
             testcases.append(entry.path)
 
         lower = entry.name.lower()
-        if lower.endswith(".asan.txt") or lower.startswith(("asan_output", "asan-output")):
+        if _is_testcase_output(lower):
             if _file_has_verified_asan(entry.path):
                 verified_asan.add(entry.path)
 

@@ -291,9 +291,10 @@ bin/cluster-findings "$RESULTS_DIR"
 bin/show-exclusions "$RESULTS_DIR"
 ```
 
-`export-repro` reads the nearest `.session-env` above its working directory,
-which is why it runs from inside the result tree; `--slug` alone would pick
-the first backend alphabetically.
+`export-repro` reads the pinned `.session-env` above an explicitly named crash
+directory. For a bare crash ID, it uses the nearest session above the working
+directory, which is why this example runs inside the result tree. `--slug`
+alone could select a different backend's session.
 
 `bin/severity --batch` scores reportable crashes and findings. Pending and
 not-reportable artifacts remain unscored. Re-run clustering after changing a

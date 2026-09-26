@@ -171,6 +171,12 @@ cfg_for_leak = er.target_config.Config()
 cfg_for_leak.results_dir = str(ROOT / "output" / "demo" / "codex" / "results")
 assert_eq(True, er._bundle_text_has_internal_ref(f"path={cfg_for_leak.results_dir}", cfg_for_leak),
           "leak scan: dynamic RESULTS_DIR path is forbidden")
+assert_eq(False, er._bundle_text_has_internal_ref(
+    'export TARGET_ROOT="$(cd "$src" && pwd)"\n', cfg_for_leak),
+    "leak scan permits a source root derived from the replay checkout")
+assert_eq(True, er._bundle_text_has_internal_ref(
+    'export TARGET_ROOT="/private/audit/checkout"\n', cfg_for_leak),
+    "leak scan still rejects a pinned audit source root")
 
 # Hardcoded host-path prefixes are no longer the gate — only env-var
 # tokens and the cfg.* prefix loop. Verify the old /Users-only regex
@@ -1635,6 +1641,10 @@ er.write_c_harness_template(
     input_name="input.bin", harness_name="harness.c", harness_compiler="clang",
 )
 text_a = repro_a.read_text(encoding="utf-8")
+assert_in('export TARGET_ROOT="$(cd "$src" && pwd)"', text_a,
+          "c-harness receives the checked-out source root during replay")
+assert_in('export TOKENFUZZ_TARGET_BIN="$build"/foo', text_a,
+          "c-harness exports the rebuilt CLI path to portable process drivers")
 assert_in('san_lib="$build"/libfoo.a', text_a,
           "c-harness asan_lib SET: emits asan_lib resolve block")
 assert_in('"$here/harness.c" ${san_lib:+"$san_lib"} ${san_lib_dir:+-Wl,-rpath,"$san_lib_dir"} -lm -lpthread', text_a,
@@ -2068,6 +2078,150 @@ result = subprocess.run(
 ok = result.returncode == 0
 assert_eq(0, result.returncode,
           f"export-repro exits 0 (stdout={result.stdout[-200:]!r} stderr={result.stderr[-200:]!r})")
+
+# A Go module's direct source receipt must dispatch to the source writer, not
+# the generic CLI writer that builds ./... and resolves a product binary.
+go_output = TMP / "output" / "go-sample"
+go_results = go_output / "codex" / "results"
+go_crash = go_results / "crashes" / "CRASH-GO-1"
+go_crash.mkdir(parents=True)
+(go_output / "target.toml").write_text(
+    'slug = "go-sample"\nupstream_url = "FILL_ME"\nbuild_system = "go"\n'
+    '[sanitizer]\nenabled = ["race"]\n'
+    '[runner]\nbin = "go"\nargs = ["run", "-race", "{TESTCASE}"]\n',
+    encoding="utf-8",
+)
+(go_results / ".session-env").write_text(
+    f"RESULTS_DIR={go_results}\nTARGET_ROOT={target_root}\n"
+    "TARGET_SLUG=go-sample\nTARGET_REV=norev\n",
+    encoding="utf-8",
+)
+(go_crash / "sanitizer.txt").write_text(
+    "WARNING: DATA RACE\nRead at 0x00123456 by goroutine 8:\n"
+    "  sampleproj.Read() sample.go:91\nCRASH_RATE: 5/5\n",
+    encoding="utf-8",
+)
+(go_crash / "report.md").write_text(
+    "# CRASH-GO-1\n\n## Summary\nSample race.\n\n"
+    "Trigger source: call-sequence\nBoundary: public API\n"
+    "Caller controls: call sequence\nParameter control: direct\n"
+    "Caller contract: obeyed\n",
+    encoding="utf-8",
+)
+(go_crash / "testcase.go").write_text(
+    "package main\nfunc main() {}\n", encoding="utf-8",
+)
+(go_crash / "repro.cmd").write_text(
+    "run -race {TESTCASE}\n", encoding="utf-8",
+)
+go_export = subprocess.run(
+    [str(ROOT / "bin" / "export-repro"), str(go_crash)],
+    capture_output=True, text=True, env=env, cwd=output_root,
+)
+assert_eq(0, go_export.returncode,
+          f"export-repro dispatches Go source ({go_export.stderr[-200:]!r})")
+if (go_crash / "reproduce.sh").is_file():
+    go_script = (go_crash / "reproduce.sh").read_text(encoding="utf-8")
+    assert_in('go run -race "$testcase"', go_script,
+              "export-repro: Go source follows recorded run route")
+    assert_not_in("go build", go_script,
+                  "export-repro: Go source skips unrelated product build")
+assert_eq(True, (go_crash / "input.go").is_file(),
+          "export-repro: Go source staged in maintainer bundle")
+
+# An absolute crash path carries its own session. Starting the exporter from
+# another audit's directory must not graft that audit's source/build recipe
+# onto this crash bundle.
+context_crash = results_dir / "crashes" / "CRASH-CONTEXT-1"
+context_crash.mkdir()
+for name in ("sanitizer.txt", "input.bin"):
+    shutil.copy2(crash_dir / name, context_crash / name)
+(context_crash / "report.md").write_text(
+    "# CRASH-CONTEXT-1\n\n## Summary\nTest crash.\n\n"
+    "Trigger source: bytes\nBoundary: input file\nCaller controls: bytes\n"
+    "Parameter control: direct\nCaller contract: obeyed\n",
+    encoding="utf-8",
+)
+other_output = TMP / "output" / "otherproj"
+other_results = other_output / "codex" / "results"
+other_results.mkdir(parents=True)
+(other_output / "target.toml").write_text(
+    'slug = "otherproj"\nupstream_url = "https://example.com/other"\n'
+    'build_system = "meson"\nasan_bin = "build-asan/other"\n',
+    encoding="utf-8",
+)
+(other_results / ".session-env").write_text(
+    f"RESULTS_DIR={other_results}\nTARGET_ROOT={target_root}\n"
+    "TARGET_SLUG=otherproj\nTARGET_REV=def456\n",
+    encoding="utf-8",
+)
+context_export = subprocess.run(
+    [str(ROOT / "bin" / "export-repro"), str(context_crash)],
+    capture_output=True, text=True, env=env, cwd=other_output,
+)
+assert_eq(0, context_export.returncode,
+          "export-repro accepts an absolute crash path from another session cwd")
+if (context_crash / "reproduce.sh").exists():
+    context_script = (context_crash / "reproduce.sh").read_text(encoding="utf-8")
+    assert_in("URL=https://example.com/repo", context_script,
+              "absolute crash path selects its pinned source")
+    assert_in('cmake -S "$src" -B "$build"', context_script,
+              "absolute crash path selects its pinned build system")
+
+# A source literal containing the audit build path must not be rewritten into
+# a different executable path. Reject it so the author can make the harness
+# resolve the rebuilt binary at runtime.
+path_crash = crash_dir.parent / "CRASH-PATH-1"
+path_crash.mkdir()
+(path_crash / "sanitizer.txt").write_bytes((crash_dir / "sanitizer.txt").read_bytes())
+(path_crash / "report.md").write_text(
+    "# CRASH-PATH-1\n\n## Summary\nTest crash.\n\n"
+    "Trigger source: bytes\nBoundary: input file\nCaller controls: bytes\n"
+    "Caller contract: obeyed\n", encoding="utf-8",
+)
+(path_crash / "input.bin").write_bytes(b"ABC")
+literal = f'{target_root}/build-asan/demo'
+(path_crash / "harness.c").write_text(
+    f'int main(void) {{ const char *binary = "{literal}"; return !binary; }}\n',
+    encoding="utf-8",
+)
+path_export = subprocess.run(
+    [str(ROOT / "bin" / "export-repro"), "CRASH-PATH-1"],
+    capture_output=True, text=True, env=env, cwd=output_root,
+)
+assert_eq(1, path_export.returncode,
+          "export-repro rejects a harness whose executable path cannot be ported safely")
+assert_in("internal refs leaked", path_export.stderr,
+          "export-repro names the unportable source")
+assert_in(literal, (path_crash / "harness.c").read_text(encoding="utf-8"),
+          "export-repro preserves the harness path literal for repair")
+unsafe_env = {**env, "EXPORT_REPRO_ALLOW_INTERNAL_REFS": "1"}
+unsafe_export = subprocess.run(
+    [str(ROOT / "bin" / "export-repro"), "CRASH-PATH-1"],
+    capture_output=True, text=True, env=unsafe_env, cwd=output_root,
+)
+assert_eq(1, unsafe_export.returncode,
+          "an environment variable cannot bypass the maintainer bundle path guard")
+assert_eq(False, (path_crash / "reproduce.sh").exists(),
+          "a failed portability check leaves no misleading replay script")
+
+input_path_crash = crash_dir.parent / "CRASH-INPUT-PATH-1"
+input_path_crash.mkdir()
+(input_path_crash / "sanitizer.txt").write_bytes((crash_dir / "sanitizer.txt").read_bytes())
+(input_path_crash / "report.md").write_text(
+    "# CRASH-INPUT-PATH-1\n\n## Summary\nTest crash.\n\n"
+    "Trigger source: bytes\nBoundary: input file\nCaller controls: bytes\n"
+    "Caller contract: obeyed\n", encoding="utf-8",
+)
+(input_path_crash / "input.txt").write_text(literal + "\n", encoding="utf-8")
+input_path_export = subprocess.run(
+    [str(ROOT / "bin" / "export-repro"), "CRASH-INPUT-PATH-1"],
+    capture_output=True, text=True, env=env, cwd=output_root,
+)
+assert_eq(1, input_path_export.returncode,
+          "export-repro rejects an audit path inside exact testcase bytes")
+assert_in(literal, (input_path_crash / "input.txt").read_text(encoding="utf-8"),
+          "export-repro preserves exact testcase bytes for repair")
 
 # A receipt that no longer holds stops the export through normal error
 # handling: guessing which source ran is what the receipt exists to prevent.
@@ -2868,6 +3022,37 @@ er.write_cli_with_input_template(
 )
 assert_in('"$san_bin" "$testcase"', _cli_out.read_text(encoding="utf-8"),
           "write_cli_with_input_template: default is the bare invocation")
+
+# A direct Go source testcase is the program. Rebuilding ./... and executing
+# an arbitrary product binary loses the run route that produced the fault.
+_go_out = TMP / "reproduce-go.sh"
+er.write_go_source_template(
+    _go_out, upstream_url="FILL_ME", pinned_rev="norev", slug="sampleproj",
+    input_name="input.go", sanitizer="race", local_src="",
+    runner_args=["run", "-race", "{TESTCASE}"],
+)
+_go_text = _go_out.read_text(encoding="utf-8")
+assert_in('go run -race "$testcase"', _go_text,
+          "write_go_source_template: replays recorded source route")
+assert_not_in('go build', _go_text,
+              "write_go_source_template: does not build an unrelated product")
+_go_src = TMP / "go-source"
+_go_src.mkdir()
+(_go_out.parent / "input.go").write_text("package main\nfunc main() {}\n", encoding="utf-8")
+_fake_bin = TMP / "fake-go-bin"
+_fake_bin.mkdir()
+(_fake_bin / "go").write_text('#!/bin/sh\nprintf "%s\\n" "$PWD" "$@" > "$GO_CAPTURE"\nexit 17\n', encoding="utf-8")
+(_fake_bin / "go").chmod(0o755)
+_capture = TMP / "go-replay-args"
+_go_env = os.environ.copy()
+_go_env.update(PATH=f"{_fake_bin}:{_go_env.get('PATH', '')}", GO_CAPTURE=str(_capture))
+_go_run = subprocess.run([str(_go_out), str(_go_src)], env=_go_env,
+                         capture_output=True, text=True)
+assert_eq(17, _go_run.returncode,
+          "write_go_source_template: preserves source program exit status")
+assert_eq([str(_go_src), "run", "-race", str(_go_out.parent / "input.go")],
+          _capture.read_text(encoding="utf-8").splitlines() if _capture.exists() else [],
+          "write_go_source_template: executes from target root with staged source")
 
 _js_out = TMP / "reproduce-js.sh"
 er.write_js_shell_template(

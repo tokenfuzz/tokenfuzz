@@ -175,6 +175,22 @@ def render_named(name: str, vars_dict: dict[str, str]) -> tuple[int, str]:
     return proc.returncode, re.sub(r"[>\s]+", " ", proc.stdout)
 
 
+rc, common = render_named("common_suffix.md.j2", {"results_dir": "/r"})
+ok(rc == 0, "common_suffix renders")
+ok("bin/probe /r/scratch-N/<testcase -- <flag" in common
+   and "with a flag the target supports" in common,
+   "common suffix explains per-testcase native CLI flags")
+ok("Read TOKENFUZZ_TARGET_BIN to launch the configured sanitizer executable" in common.replace("`", ""),
+   "common suffix keeps process-driving harnesses on the rebuilt product")
+ok("Do not embed absolute audit scratch paths in testcase source" in common,
+   "common suffix keeps sidecar reproducers portable")
+ok("trace a concrete product ingress that converts untrusted bytes" in common,
+   "common suffix distinguishes direct API parameters from byte ingress")
+ok("do not edit its saved testcase, harness, or sanitizer output" in common
+   and "run bin/probe --confirm again before exporting" in common.replace("`", ""),
+   "common suffix preserves receipt-bound crash evidence")
+
+
 rc, sf = render_named("safety_framing.md.j2", {"results_dir": "/r"})
 ok(rc == 0, "safety_framing renders")
 ok("misdescribes its OWN buffer" in sf, "safety: buffer-overclaim reject clause")

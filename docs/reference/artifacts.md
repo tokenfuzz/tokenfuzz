@@ -137,7 +137,10 @@ which is what `bin/state card-yield` replays.
 
 `state/runs.jsonl` has one row per `bin/probe` invocation: verdict,
 sanitizer, duration, and, when a coverage replay ran, `coverage` (`HIT`,
-`MISSED`, `UNAVAILABLE`, and so on) with the `closest` frame it reached. An
+`MISSED`, `UNAVAILABLE`, and so on) with the `closest` frame it reached. Its
+`asan_output` names that run's own `<testcase>.run-<id>.asan.txt`, which a
+later probe never rewrites; `<testcase>.asan.txt` always shows the newest
+finished run. An
 `EXEC_FAIL` carries a normalized `execution_failure_class` plus the detailed
 `reason`; resume aggregates a five-run same-class streak across the whole
 card and offers repair or seed guidance, but never closes or re-ranks work

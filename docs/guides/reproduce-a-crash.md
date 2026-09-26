@@ -94,7 +94,10 @@ What it does:
    kept, so you can test an applied candidate patch.
 2. Configures and builds the project with the same sanitizer flags TokenFuzz
    used during discovery.
-3. Runs the recorded testcase against the resulting binary or harness.
+3. Runs the recorded testcase against the resulting binary or harness. A
+   C/C++ harness sees `TARGET_ROOT` set to the chosen checkout and, when the
+   target has a sanitizer executable, `TOKENFUZZ_TARGET_BIN` set to the
+   rebuilt one, as `bin/probe` provides them during the audit.
 4. Prints the run output and exits with the reproduced run's status.
 
 ### Prerequisites on the build host

@@ -2923,6 +2923,9 @@ def rebuild_pool(bench_dir: Path, target_slug: str, backend: str, model: str, dr
                     log(f"WARN: reproducer bundle failed for {crash.name} ({reason})")
                     continue
                 if not exported:
+                    # export-repro printed why; a refused portability check
+                    # needs a repaired testcase or harness, not a retry.
+                    log(f"WARN: reproducer bundle refused for {crash.name} ({reason})")
                     continue
                 bundled += 1
     if bundled:

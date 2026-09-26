@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import json
+import hashlib
 import shutil
 import stat
 import subprocess
@@ -129,6 +130,85 @@ class ProbeAutoRouteTests(unittest.TestCase):
         )
         located = self.run_probe("--dry-run")
         self.assertIn("want=app_parse ", located.stdout, located.stdout + located.stderr)
+
+    def test_repeated_probe_keeps_each_run_output_and_names_the_latest(self) -> None:
+        # Repeated probes of one testcase shared one output path, so earlier
+        # state rows came to point at a later run's diagnostic.
+        self.run_probe(PROBE_AUTO_ROUTE="0")
+        first_row = json.loads(
+            (self.results / "state" / "runs.jsonl").read_text().splitlines()[0]
+        )
+        first_output = Path(first_row["asan_output"])
+        original = first_output.read_bytes()
+        self.run_probe(PROBE_AUTO_ROUTE="0")
+        rows = [
+            json.loads(line)
+            for line in (self.results / "state" / "runs.jsonl").read_text().splitlines()
+        ]
+        outputs = [Path(row["asan_output"]) for row in rows]
+        self.assertEqual(len(set(outputs)), 2)
+        self.assertEqual(first_output.read_bytes(), original)
+        self.assertEqual(
+            self.testcase.with_suffix(".asan.txt").read_bytes(),
+            outputs[1].read_bytes(),
+            "the conventional output name shows the newest run",
+        )
+
+    def test_direct_interpreter_does_not_execute_native_testcase_source(self) -> None:
+        marker = self.root / "node-ran"
+        node = self.target / "node"
+        node.write_text(
+            f"#!{sys.executable}\nfrom pathlib import Path\n"
+            f"Path({str(marker)!r}).touch()\n",
+            encoding="utf-8",
+        )
+        node.chmod(node.stat().st_mode | stat.S_IXUSR)
+        self.env.pop("ASAN_GENERIC_BIN", None)
+        config = self.results / ".target.toml"
+        config.write_text(
+            'target = "testproject"\nbuild_system = "npm"\nis_browser = "0"\n'
+            '[threat_model]\nattacker_controls = ["bytes"]\n'
+            '[sanitizer]\nenabled = []\n'
+            f'[runner]\nbin = "{node}"\nargs = ["{{TESTCASE}}"]\n',
+            encoding="utf-8",
+        )
+        (self.results / ".session-env").write_text(
+            f"RESULTS_DIR={self.results}\nTARGET_ROOT={self.target}\n"
+            "TARGET_SLUG=testproject\n"
+            f"TARGET_CONFIG_SHA256={hashlib.sha256(config.read_bytes()).hexdigest()}\n",
+            encoding="utf-8",
+        )
+        self.testcase = self.testcase.with_suffix(".rs")
+        self.testcase.write_text(
+            "// TARGET: src/build_hir.rs:lower:42\n"
+            "// HYPOTHESIS-ID: H-rust-route\n// CATEGORY: state\n"
+            "fn main() {}\n",
+            encoding="utf-8",
+        )
+        proc = self.run_probe(PROBE_SANITIZER="runner")
+        self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+        self.assertIn("cannot execute .rs testcase source", proc.stderr, proc.stdout)
+        self.assertFalse(marker.exists())
+
+    @unittest.skipUnless(shutil.which("clang"), "clang is required for a C harness")
+    def test_compiled_harness_receives_configured_target_binary(self) -> None:
+        self.testcase.write_text(
+            "// TARGET: src/parse.c:app_parse:42\n"
+            "// HYPOTHESIS-ID: H-driver\n// CATEGORY: state\n"
+            "// HARNESS: harness.c\n",
+            encoding="utf-8",
+        )
+        (self.testcase.parent / "harness.c").write_text(
+            '#include <stdio.h>\n#include <stdlib.h>\n'
+            'int main(void) { const char *p = getenv("TOKENFUZZ_TARGET_BIN"); '
+            'if (!p) return 2; printf("DRIVER_BIN=%s\\n", p); return 0; }\n',
+            encoding="utf-8",
+        )
+        proc = self.run_probe(
+            PROBE_AUTO_ROUTE="0", TARGET_ASAN_BIN="build-asan/bin/myrunner"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn(f"DRIVER_BIN={self.canonical}", proc.stdout + proc.stderr)
 
     def test_sentinel_and_enumeration(self) -> None:
         output = self.root / "canonical.out"

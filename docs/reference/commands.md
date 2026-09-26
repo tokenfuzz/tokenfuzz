@@ -426,10 +426,11 @@ bin/cluster-findings "$RESULTS"
 bin/show-exclusions "$RESULTS"
 ```
 
-`export-repro` reads the nearest `.session-env` above its working directory,
-so run it from inside the result tree; `--slug` alone picks the first
-backend alphabetically, which may not be the one you mean. For a detached
-artifact, name the crash, checkout, and revision explicitly:
+`export-repro` reads the pinned `.session-env` above an explicitly named crash
+directory. For a bare crash ID, run it inside the result tree so it uses the
+nearest session above the working directory. `--slug` alone may select a
+different backend's session. For a detached artifact without a session, name
+the crash, checkout, and revision explicitly:
 
 ```bash
 bin/export-repro CRASH-001-1 --slug "$TARGET" \

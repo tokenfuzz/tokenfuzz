@@ -398,12 +398,17 @@ project.
 ## `reproduce.sh` templates
 
 `bin/export-repro` writes a runnable `reproduce.sh` for crashes driven by a
-browser/JS page, a CLI input (including Go `race` binaries), a recorded shell
-wrapper, or a C/C++ sidecar harness. Sidecar harnesses in other languages
-(`.go`, `.rs`, `.swift`, `.kt`, and the interpreted extensions above) run
+browser/JS page, a CLI input, a direct Go `.go` testcase, a recorded shell
+wrapper, or a C/C++ sidecar harness. Direct Go testcases replay the recorded
+`go run` arguments from the target checkout. Sidecar harnesses in other
+languages (`.rs`, `.swift`, `.kt`, and the interpreted extensions above) run
 through `bin/probe` but are not yet packaged by the exporter. See
 [Reproduce a crash](reproduce-a-crash.md) for the script's checkout and build
 contract.
+
+Use the language's temporary-directory API for files a sidecar testcase
+creates. An absolute path into the audit's scratch directory makes the
+testcase unusable from a maintainer bundle and is rejected by the exporter.
 
 ## See also
 

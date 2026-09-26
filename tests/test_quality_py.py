@@ -158,6 +158,14 @@ with tempfile.TemporaryDirectory() as td:
     ok(len(orphan_paths) == 1 and orphan_paths[0].endswith("good2.js"),
        "orphan path emitted", str(orphan_paths))
 
+    # bin/probe keeps each run's own output; only the conventional name,
+    # which shows the newest run, speaks for the testcase.
+    (p / "good.run-11-22.asan.txt").write_text("EXECUTION_RATE: 4\n")
+    (p / "good2.run-11-23.asan.txt").write_text("EXECUTION_RATE: 4\n")
+    proc = run(["scan-scratch", str(p)], check=True)
+    assert_eq("sanitizer_runs=1 testcases=2 orphans=1", proc.stdout.strip(),
+              "scan-scratch ignores per-run output history")
+
 
 # ── promote-corpus + regenerate-corpus-index ─────────────────────────
 print("\npromote-corpus / regenerate-corpus-index")

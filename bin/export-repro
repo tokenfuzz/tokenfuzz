@@ -1091,6 +1091,8 @@ exit "$rc"
 C_HARNESS_RUN = """\
 
 here=$(cd "$(dirname "$0")" && pwd)
+export TARGET_ROOT="$(cd "$src" && pwd)"
+__TARGET_BIN_BLOCK__
 # CMake/Meson frequently emit generated public headers (a config header, a
 # version header, or the project's API header configured from a .in
 # template) into a build subdirectory that target.toml's `includes` doesn't
@@ -2488,6 +2490,9 @@ _FORBIDDEN_REFS_RE = re.compile(
     r"\b(?:RESULTS_DIR|TARGET_ROOT|TARGET_SLUG|AUDIT_AGENT_NUM|"
     r"HYPOTHESIS_ID|TRIED_INPUTS_LOG|ASAN_OUTPUT_FILE|HITS_LOG_PATH)="
 )
+_PORTABLE_TARGET_ROOT_RE = re.compile(
+    r'^export TARGET_ROOT="\$\(cd "\$src" && pwd\)"$', re.MULTILINE,
+)
 
 
 def _bundle_text_has_internal_ref(text: str, cfg: target_config.Config) -> bool:
@@ -2503,7 +2508,9 @@ def _bundle_text_has_internal_ref(text: str, cfg: target_config.Config) -> bool:
          expected to have rewritten these before the scan; anything
          surviving is a real escape.
     """
-    if _FORBIDDEN_REFS_RE.search(text):
+    # The generated C-harness script derives this one value from the checkout
+    # chosen by the maintainer. It is not the audit's pinned TARGET_ROOT.
+    if _FORBIDDEN_REFS_RE.search(_PORTABLE_TARGET_ROOT_RE.sub("", text)):
         return True
     for raw in (cfg.results_dir, cfg.target_root, cfg.logdir):
         if not raw:
@@ -2904,6 +2911,17 @@ def write_c_harness_template(out: Path, *, build_system: str, upstream_url: str,
         '  export DYLD_LIBRARY_PATH="$san_lib_dir${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"\n'
         'fi\n'
     )
+    target_bin_block = "unset TOKENFUZZ_TARGET_BIN\n"
+    if san_bin_rel:
+        tail = shq(_strip_sanitizer_build_prefix(san_bin_rel, sanitizer))
+        relative = shq(san_bin_rel)
+        target_bin_block += (
+            f'if [ -x "$build"/{tail} ]; then\n'
+            f'  export TOKENFUZZ_TARGET_BIN="$build"/{tail}\n'
+            f'elif [ -x "$src"/{relative} ]; then\n'
+            f'  export TOKENFUZZ_TARGET_BIN="$src"/{relative}\n'
+            'fi\n'
+        )
     text = (
         emit_preamble(build_system, upstream_url, pinned_rev, slug, san_bin_rel,
                       sanitizer, local_src)
@@ -2913,6 +2931,7 @@ def write_c_harness_template(out: Path, *, build_system: str, upstream_url: str,
         + link_lib_resolves
         + _sub_template(
             C_HARNESS_RUN,
+            __TARGET_BIN_BLOCK__=target_bin_block,
             __INCLUDES_ARGS__=includes_args,
             __LINK_LIBS__=link_libs,
             # A self-contained harness (constructs its own triggering input)
@@ -2986,6 +3005,34 @@ def write_cli_with_input_template(out: Path, *, build_system: str, upstream_url:
                 ),
             )
         )
+    out.write_text(text, encoding="utf-8")
+    os.chmod(out, 0o755)
+
+
+def write_go_source_template(out: Path, *, upstream_url: str, pinned_rev: str,
+                             slug: str, input_name: str, sanitizer: str,
+                             local_src: str, runner_args: list[str],
+                             extra_options: str = "", mode: str = "generic",
+                             recorded_env_options: str = "") -> None:
+    """Replay a direct Go testcase in the pinned module, not a product binary."""
+    args = runner_args or ["run", *(["-race"] if sanitizer == "race" else []),
+                           crash_artifacts.TESTCASE_TOKEN]
+    if not any(crash_artifacts.TESTCASE_TOKEN in arg for arg in args):
+        args = [*args, crash_artifacts.TESTCASE_TOKEN]
+    command = " ".join(_testcase_shell_arg(arg, '"$testcase"') for arg in args)
+    text = (
+        emit_preamble("go", upstream_url, pinned_rev, slug, "", sanitizer,
+                      local_src)
+        + '\nhere="$(cd "$(dirname "$0")" && pwd)"\n'
+        + f'testcase="$here/{input_name}"\n'
+        + f'echo "=== running {sanitizer_meta(sanitizer)["label"]} repro: $testcase ===" >&2\n'
+        + 'cd "$src"\n'
+        + "rc=0\n"
+        + sanitizer_runtime_env_block(sanitizer, extra_options, mode,
+                                      recorded_env_options)
+        + f'go {command} || rc=$?\n'
+        + 'echo "[repro] exit=$rc" >&2\nexit "$rc"\n'
+    )
     out.write_text(text, encoding="utf-8")
     os.chmod(out, 0o755)
 
@@ -3349,10 +3396,26 @@ def main(argv: list[str]) -> int:
         usage()
         return 2
 
-    # Discover the session (slug dir / target.toml). Either via --slug or by
-    # walking up from CWD.
+    # An explicit crash directory owns its session. Looking up CWD first can
+    # silently graft another concurrent target's build recipe onto the bundle.
+    crash_path = Path(args.crash_dir or args.crash_id).expanduser()
+    session_at_crash = (
+        next(
+            (parent for parent in (crash_path, *crash_path.parents)
+             if (parent / ".session-env").is_file()),
+            None,
+        )
+        if crash_path.is_dir() else None
+    )
     cfg = target_config.Config()
-    if args.slug:
+    if session_at_crash is not None:
+        try:
+            cfg = target_config.load(crash_path)
+        except (FileNotFoundError, OSError, ValueError) as exc:
+            die(f"crash session could not be loaded: {exc}")
+        if args.slug and cfg.slug != args.slug:
+            die(f"crash session target {cfg.slug!r} disagrees with --slug {args.slug!r}")
+    elif args.slug:
         slug_dir = SCRIPT_ROOT / "output" / args.slug
         session_dir = target_config.find_slug_session_dir(slug_dir)
         if session_dir is not None:
@@ -3679,6 +3742,19 @@ def main(argv: list[str]) -> int:
                 local_src=local_src,
                 audit_build_script=audit_build_script,
             )
+        elif (input_ext_lower == "go" and build_system == "go"
+              and Path(cfg.runner_bin).name == "go"
+              and not cfg_sanitizer_bin(cfg, sanitizer)):
+            # A direct Go source testcase is itself the executable. The
+            # generic CLI branch rebuilds ./... and may run another product.
+            write_go_source_template(
+                repro_path, upstream_url=upstream_url, pinned_rev=pinned_rev,
+                slug=slug, input_name=input_name, sanitizer=sanitizer,
+                local_src=local_src, runner_args=repro_args or list(cfg.runner_args),
+                extra_options=sanitizer_extra_options,
+                mode=run_mode or "generic",
+                recorded_env_options=recorded_env_options,
+            )
         elif input_name:
             # Replay the recorded argv when the crash needs non-default flags;
             # {TESTCASE} maps to the staged input, the rest is shell-quoted.
@@ -3845,27 +3921,23 @@ def main(argv: list[str]) -> int:
         )
         (stage / "report.md").write_text(report_text, encoding="utf-8")
 
-        # ── Path normalization: rewrite this session's absolute audit
-        #    paths to portable relative form *before* the leak scan
-        #    runs. The agent's report.md, ASan debug-info, and harness
-        #    #include comments all carry $RESULTS_DIR/$TARGET_ROOT
-        #    paths verbatim; without rewriting, the leak scan would
-        #    reject every bundle on every container layout. After
-        #    rewriting, anything the scan still flags is a real escape
-        #    that needs an explicit code fix.
+        # Rewrite prose and the generated script, but preserve executable
+        # source and testcase bytes. Replacing a path inside a C string or
+        # crafted input changes the reproducer while leaving a plausible
+        # bundle behind; the leak scan below rejects those files for repair.
         normalize_candidates = [stage / "report.md", stage / "reproduce.sh"]
-        normalize_candidates += list(stage.glob("harness.*"))
-        normalize_candidates += list(stage.glob("input.*"))
+        scan_candidates = normalize_candidates + list(stage.glob("harness.*"))
+        scan_candidates += list(stage.glob("input.*"))
         # Stable dedupe — list.unique-preserve-order.
         _seen: set[str] = set()
         normalize_targets: list[Path] = []
-        for c in normalize_candidates:
+        for c in scan_candidates:
             key = str(c)
             if key in _seen:
                 continue
             _seen.add(key)
             normalize_targets.append(c)
-        for f in normalize_targets:
+        for f in normalize_candidates:
             if f.is_file():
                 _normalize_bundle_file(f, cfg)
 
@@ -3882,10 +3954,7 @@ def main(argv: list[str]) -> int:
                 leaked.append(str(f))
         if leaked:
             msg = f"internal refs leaked into: {' '.join(leaked)}"
-            if os.environ.get("EXPORT_REPRO_ALLOW_INTERNAL_REFS") == "1":
-                sys.stderr.write(f"[export-repro] WARNING: {msg}\n")
-            else:
-                die(f"{msg}; set EXPORT_REPRO_ALLOW_INTERNAL_REFS=1 only for local debugging")
+            die(f"{msg}; repair the testcase or harness before export")
 
         # ── Migrate junk into .audit/ ────────────────────────────────
         if out_dir == crash_dir:
