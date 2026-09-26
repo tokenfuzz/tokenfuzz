@@ -179,6 +179,10 @@ class DeepInvestigationPolicyTests(unittest.TestCase):
             ):
                 with self.subTest(backend=backend or "unset", variant=name):
                     self.assertIn("bin/state resume --agent", rendered)
+                    # A triage hold hands a crash back after its hypothesis
+                    # closed, so the no-active-work variant must not stop
+                    # before the owner finishes it.
+                    self.assertRegex(rendered, r"(?i)pending crash completion")
                     self.assertIn("TURN BUDGET", rendered)
                     self.assertIn("Batch independent tool calls", rendered)
                     self.assertIn("bin/probe", rendered)
