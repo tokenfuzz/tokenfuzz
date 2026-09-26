@@ -1507,6 +1507,60 @@ class WorkQueueTests(unittest.TestCase):
         self.assertEqual(reproduced["id"], "WORK-BUILT")
         self.assertEqual(analyzed["id"], "WORK-OPTIONAL")
 
+    def test_go_foreign_platform_source_follows_runnable_source(self) -> None:
+        """A high-scoring foreign Go unit must not consume a runnable window."""
+        cards = [
+            self.card("FOREIGN", "vendor/pkg/syscall_zos_s390x.go", score=300, strategy="S7"),
+            self.card("NATIVE", "pkg/parse_darwin_arm64.go", score=20, strategy="S7"),
+            self.card("SOURCE-REVIEW", "vendor/pkg/syscall_zos_s390x.go", score=300, strategy="S3"),
+        ]
+        with mock.patch.object(
+            workqueue, "_go_build_target", return_value=(
+                "darwin", "arm64", {"darwin", "linux"}, {"arm64", "s390x"},
+            ),
+        ):
+            annotated = workqueue.annotate_card_buildability(self.ctx, cards)
+        self.assertEqual(annotated[0]["buildability"], "platform-mismatch")
+        self.assertIn("s390x", annotated[0]["buildability_reason"])
+        self.assertEqual(annotated[1]["buildability"], "unknown")
+        self.assertEqual(annotated[2]["buildability"], "unknown")
+        self.assertLess(
+            workqueue._built_first(annotated[1]),
+            workqueue._built_first(annotated[0]),
+        )
+
+    def test_go_filename_constraints_follow_go_build(self) -> None:
+        # go/build ignores the segment before the first underscore, so a bare
+        # `linux.go` or `linux_arm64.go` is built on darwin/arm64.
+        target = ("darwin", "arm64", {"darwin", "linux", "windows"}, {"arm64", "amd64"})
+        for name, expected in (
+            ("pkg/abi/linux/linux.go", ""),
+            ("pkg/linux_arm64.go", ""),
+            ("pkg/syscall_linux.go", "linux"),
+            ("pkg/syscall_windows_test.go", "windows"),
+            ("pkg/zerrors_linux_amd64.go", "linux, amd64"),
+            ("pkg/parse_darwin_arm64.go", ""),
+        ):
+            with self.subTest(name=name):
+                self.assertEqual(workqueue._go_platform_mismatch(name, target), expected)
+
+    def test_go_platform_aliases_keep_buildable_files(self) -> None:
+        known_os = {"android", "linux", "ios", "darwin", "illumos", "solaris"}
+        known_arch = {"arm64", "amd64"}
+        for selected, source_tag in (
+            ("android", "linux"),
+            ("ios", "darwin"),
+            ("illumos", "solaris"),
+        ):
+            with self.subTest(selected=selected):
+                target = (selected, "arm64", known_os, known_arch)
+                self.assertEqual(
+                    workqueue._go_platform_mismatch(
+                        f"src/parse_{source_tag}_arm64.go", target,
+                    ),
+                    "",
+                )
+
     def test_a_unit_only_an_alternate_build_compiles_names_that_config(self) -> None:
         (self.target / "src").mkdir()
         for name in ("core.c", "extra.c"):

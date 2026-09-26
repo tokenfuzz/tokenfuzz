@@ -31,6 +31,7 @@ def ok(cond: bool, name: str, detail: str = "") -> None:
 for seg in (
     "doc", "docs", "test", "tests", "fuzz", "fuzzer", "example",
     "examples", "bench", "benchmark", "benchmarks", "asv_bench",
+    "flow-typed",
 ):
     ok(
         audit_scope.is_excluded_path_part(seg),

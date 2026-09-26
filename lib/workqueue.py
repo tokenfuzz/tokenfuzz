@@ -19,6 +19,7 @@ import math
 import os
 import re
 import shlex
+import subprocess
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -1641,17 +1642,81 @@ def _probeable_alternate_builds(ctx: Context) -> dict[str, str]:
     return ready
 
 
+def _go_build_target() -> tuple[str, str, set[str], set[str]] | None:
+    """Return Go's selected target and known filename suffix tags, if available."""
+    try:
+        selected = subprocess.run(
+            ["go", "env", "GOOS", "GOARCH"], capture_output=True, text=True,
+            timeout=5, check=False,
+        )
+        supported = subprocess.run(
+            ["go", "tool", "dist", "list"], capture_output=True, text=True,
+            timeout=5, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    target = selected.stdout.splitlines()
+    if selected.returncode or supported.returncode or len(target) != 2:
+        return None
+    pairs = [line.split("/", 1) for line in supported.stdout.splitlines() if "/" in line]
+    return target[0], target[1], {row[0] for row in pairs}, {row[1] for row in pairs}
+
+
+def _go_platform_mismatch(
+    relative: str, target: tuple[str, str, set[str], set[str]],
+) -> str:
+    """Report only filename constraints that Go itself recognizes.
+
+    Mirrors go/build's goodOSArchFile: the name before the first `.`, only
+    what follows its first `_`, a trailing `_test` dropped, then an `os_arch`
+    pair or one tag. `linux.go` and `linux_arm64.go` name no OS.
+    """
+    goos, goarch, known_os, known_arch = target
+    # go/build's filename matching gives these targets an additional OS tag.
+    implied_os = {"android": "linux", "ios": "darwin", "illumos": "solaris"}
+    accepted = {goos, goarch, implied_os.get(goos, "")}
+    name = Path(relative).name.split(".", 1)[0]
+    if "_" not in name:
+        return ""
+    parts = name[name.index("_"):].split("_")
+    if parts[-1] == "test":
+        parts.pop()
+    if len(parts) >= 2 and parts[-2] in known_os and parts[-1] in known_arch:
+        required = parts[-2:]
+    elif parts and (parts[-1] in known_os or parts[-1] in known_arch):
+        required = parts[-1:]
+    else:
+        required = []
+    return ", ".join(tag for tag in required if tag not in accepted)
+
+
 def annotate_card_buildability(ctx: Context, cards: list[dict]) -> list[dict]:
     """Attach advisory compilation evidence without removing source-review work."""
     object_index, build_count = _sanitizer_object_index(ctx)
     alternates: dict[str, str] | None = None
+    go_target = _go_build_target() if any(
+        Path(str(card.get("file", ""))).suffix.lower() == ".go" for card in cards
+    ) else None
     out: list[dict] = []
     for original in cards:
         card = dict(original)
         card.pop("build_config", None)
         relative = normalized_relpath(card.get("file", "")).lower()
         suffix = Path(relative).suffix.lower()
-        if not object_index or suffix not in _NATIVE_COMPILATION_UNIT_EXTS:
+        # S7/S8 require a runnable input route. Keep foreign-platform files
+        # at normal priority for source-review lanes that can reason about
+        # them without executing the configured runner.
+        mismatch = _go_platform_mismatch(relative, go_target) if (
+            suffix == ".go" and go_target
+            and str(card.get("strategy", "")).upper() in {"S7", "S8"}
+        ) else ""
+        if mismatch:
+            card["buildability"] = "platform-mismatch"
+            card["buildability_reason"] = (
+                f"Go filename requires {mismatch}; configured Go target "
+                f"{go_target[0]}/{go_target[1]}"
+            )
+        elif not object_index or suffix not in _NATIVE_COMPILATION_UNIT_EXTS:
             card["buildability"] = "unknown"
         else:
             # Probe the source's whole path, never a suffix of it: the index
@@ -1680,17 +1745,20 @@ def annotate_card_buildability(ctx: Context, cards: list[dict]) -> list[dict]:
 
 
 def _buildability_priority(card: dict) -> int:
-    """Promote positive build evidence without ranking absence as proof.
+    """Promote positive build evidence and demote explicit platform mismatch.
 
     Generated and unity builds compile many sources through one aggregate
-    object, so `not-built` is no stronger than `unknown` at claim time. Only a
-    found object promotes; nothing is demoted for lacking one.
+    object, so `not-built` is no stronger than `unknown` at claim time. A Go
+    filename constrained to another OS or architecture is stronger evidence
+    than a missing object; keep it available for source review after runnable
+    cards.
     """
-    return 0 if card.get("buildability") == "built" else 1
+    status = card.get("buildability")
+    return 0 if status == "built" else 2 if status == "platform-mismatch" else 1
 
 
 def _built_first(card: dict) -> int:
-    """Rank order for selecting the card set itself: promote only on evidence.
+    """Rank order for selecting the card set itself using concrete evidence.
 
     Truncation drops work, so the window reacts only to an object actually
     found. `unknown` is absence of evidence, not evidence of absence: it
@@ -1700,7 +1768,7 @@ def _built_first(card: dict) -> int:
     Claim ordering uses the same evidence-only distinction, so a generated or
     amalgamated source is not buried after the window is selected either.
     """
-    return 0 if card.get("buildability") == "built" else 1
+    return _buildability_priority(card)
 
 
 def read_sample(path: Path, max_bytes: int = 256_000) -> str:

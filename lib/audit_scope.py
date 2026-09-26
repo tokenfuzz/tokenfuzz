@@ -13,10 +13,12 @@ Two consumers:
   ``tests/`` directory.
 
 Scope is deliberately narrow: only directory-name families that are
-universally non-product (doc, example, test, benchmark, fuzz). Build outputs,
-vendored deps, tools, scripts, and CI metadata are intentionally NOT
+universally non-product (doc, example, test, benchmark, fuzz, Flow declarations).
+Build outputs, vendored deps, tools, scripts, and CI metadata are intentionally NOT
 excluded here — auditing vendored libraries and build-generated code
 is in scope.
+Flow's ``flow-typed/`` directory holds declaration stubs, not executable
+runtime code, and is excluded for the same reason as other non-product source.
 
 The prefix rules in :func:`is_excluded_path_part` are harness scanner
 concerns and are not surfaced into the model-direct prompt. Model-direct
@@ -33,6 +35,7 @@ EXCLUDED_PATH_SEGMENTS = frozenset({
     "test", "tests", "testing", "unittest", "unittests",
     "bench", "benchmark", "benchmarks", "asv_bench",
     "fuzz", "fuzzer", "fuzzers", "fuzzing",
+    "flow-typed",
 })
 
 
