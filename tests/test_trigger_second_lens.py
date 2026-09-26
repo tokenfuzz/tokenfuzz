@@ -162,13 +162,37 @@ class SecondLensTests(unittest.TestCase):
             encoding="utf-8",
         )
         report = self.finding / "report.md"
+        self.assertEqual(module.results_tree(report), self.root.resolve())
         with mock.patch.dict(os.environ, {
             "TARGET_ATTACKER_CONTROLS_CSV": "bytes", "TARGET_ROOT": "/elsewhere",
         }):
-            module.adopt_pinned_session(report)
+            module.adopt_pinned_session(module.results_tree(report))
             self.assertEqual(os.environ["TARGET_ATTACKER_CONTROLS_CSV"], "bytes,race")
             self.assertEqual(os.environ["TARGET_ROOT"], "/elsewhere",
                              "the caller's checkout still wins")
+
+    def test_a_batch_spanning_results_trees_is_refused(self) -> None:
+        # One process carries one tree's threat model and source root, so a
+        # mixed batch would judge its later items under the first item's.
+        other = self.root / "other"
+        (other / "findings" / "FIND-9").mkdir(parents=True)
+        (other / "findings" / "FIND-9" / "report.md").write_text("# other\n", encoding="utf-8")
+        for tree in (self.root, other):
+            (tree / ".session-env").write_text(f"RESULTS_DIR={tree}\n", encoding="utf-8")
+        manifest = self.root / "batch.json"
+        manifest.write_text(json.dumps({"items": [
+            {"id": "a", "finding": str(self.finding / "report.md"), "output": str(self.root / "a.json")},
+            {"id": "b", "finding": str(other / "findings" / "FIND-9" / "report.md"),
+             "output": str(self.root / "b.json")},
+        ]}), encoding="utf-8")
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "bin" / "validate-finding"), "--gate", "trigger",
+             "--batch-manifest", str(manifest), "--target-path", str(self.target),
+             "--backend", "codex"],
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(result.returncode, 4, result.stderr)
+        self.assertIn("spans results trees", result.stderr)
 
 if __name__ == "__main__":
     unittest.main()

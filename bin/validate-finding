@@ -403,21 +403,23 @@ def extract_vote_batch(text: str) -> dict[str, dict]:
     return _keyed_votes(_parse_items_array(text, matches[-1].end() - 1))
 
 
-def adopt_pinned_session(artifact: Path) -> None:
-    """Judge under the threat model the artifact's results tree pinned.
-
-    Run by hand, this process inherits no audit session; left alone it would
-    judge against a `bytes` default or a stale value from another run. The
-    tree's threat model is authoritative, and its other variables fill only
-    what the caller left unset. One batch never spans two trees.
-    """
-    results = next(
+def results_tree(artifact: Path) -> Path | None:
+    """The results tree whose pinned session an artifact belongs to."""
+    return next(
         (parent for parent in artifact.resolve().parents
          if (parent / ".session-env").is_file()),
         None,
     )
-    if results is None:
-        return
+
+
+def adopt_pinned_session(results: Path) -> None:
+    """Judge under the threat model a results tree pinned.
+
+    Run by hand, this process inherits no audit session; left alone it would
+    judge against a `bytes` default or a stale value from another run. The
+    tree's threat model is authoritative, and its other variables fill only
+    what the caller left unset.
+    """
     for key, value in target_config.pinned_session_environment(results).items():
         if key == "TARGET_ATTACKER_CONTROLS_CSV" or not os.environ.get(key):
             os.environ[key] = value
@@ -428,16 +430,23 @@ def main(argv=None) -> int:
     if not args.finding and not args.batch_manifest:
         print("FATAL: --finding or --batch-manifest is required", file=sys.stderr)
         return 4
-    reviewed = args.finding
+    reviewed = [args.finding] if args.finding else []
     if not reviewed:
         try:
-            reviewed = json.loads(
-                Path(args.batch_manifest).read_text(encoding="utf-8")
-            )["items"][0]["finding"]
-        except (OSError, ValueError, KeyError, IndexError, TypeError):
-            reviewed = ""  # the manifest checks below report it
-    if reviewed:
-        adopt_pinned_session(Path(str(reviewed)))
+            reviewed = [
+                str(item["finding"]) for item in json.loads(
+                    Path(args.batch_manifest).read_text(encoding="utf-8")
+                )["items"]
+            ]
+        except (OSError, ValueError, KeyError, TypeError):
+            reviewed = []  # the manifest checks below report it
+    trees = {results_tree(Path(path)) for path in reviewed if path}
+    if len(trees) > 1:
+        # One process carries one tree's threat model and source root.
+        print("FATAL: batch manifest spans results trees", file=sys.stderr)
+        return 4
+    if trees and (tree := trees.pop()) is not None:
+        adopt_pinned_session(tree)
     if args.batch_manifest:
         if args.gate != "trigger":
             print("FATAL: batch manifests support only the trigger gate", file=sys.stderr)
