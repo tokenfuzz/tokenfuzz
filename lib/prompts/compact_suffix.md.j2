@@ -43,6 +43,16 @@ substitute the fallback default when the queue assigned something else.
   with `$RESULTS_DIR/`. For opaque bytes, preserve
   them exactly and pass `--hypothesis-id H-...`; under S8 add
   `--property <kind>`.
+- A missing prerequisite (device, optional module, platform): print
+  `NO_EXEC: <proof>` and exit 2, never exit 0 or raise. A harness running the
+  target as a child exits with the child's nonzero status; a zero exit that
+  never reached the target records CLEAN, evidence against the hypothesis.
+- Put a native CLI flag the hypothesis needs after `--`:
+  `bin/probe {{ scratch_name }}/<testcase> -- <flag>`, the same on `--confirm`.
+- A C/C++ harness that drives the product executable launches
+  `$TOKENFUZZ_TARGET_BIN`. Testcases never embed absolute audit scratch paths;
+  use the language's temp-directory API or a path beside the testcase. Export
+  rejects internal paths.
 - Run `bin/probe-history <testcase>` before repeating a probe. Reuse a
   confirmed verdict unless the binary, harness, or testcase changed.
 - If target code must generate, transform, or inspect a seed, perform that

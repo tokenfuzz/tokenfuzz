@@ -215,6 +215,12 @@ class DeepInvestigationPolicyTests(unittest.TestCase):
         self.assertIn("bin/scratch-search <function>", compact_contract)
         self.assertNotIn("rejected-crashes.md", compact_contract)
         self.assertIn("NEEDS CONTENT", compact_contract)
+        # Compact sessions carry no digest, so the testcase rules that keep a
+        # missing prerequisite from reading CLEAN live in their contract too.
+        self.assertIn("`NO_EXEC: <proof>` and exit 2", compact_contract)
+        self.assertIn("exits with the child's nonzero status", compact_contract)
+        self.assertIn("<testcase> -- <flag>", compact_contract)
+        self.assertIn("$TOKENFUZZ_TARGET_BIN", compact_contract)
 
     def test_cold_guide_is_embedded_once_per_backend(self) -> None:
         # Codex loads the repo-root AGENTS.md itself as its project document
