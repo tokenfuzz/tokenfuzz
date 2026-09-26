@@ -18,8 +18,14 @@ CODEX_HOME_TMP=""
 if [ -z "${TOKENFUZZ_LIVE_BACKENDS:-}" ]; then
   CODEX_HOME_TMP="$(mktemp -d "${TMPDIR:-/tmp}/tokenfuzz-codex-home.XXXXXX")"
   export CODEX_HOME="$CODEX_HOME_TMP"
-  trap 'rm -rf ${CODEX_HOME_TMP:+"$CODEX_HOME_TMP"}' EXIT
 fi
+
+# A decision logged with no LOGDIR falls back to the shared
+# /tmp/llm-decisions.log, which real runs use as their audit trail. Suites
+# that name their own log still override this.
+DECISION_LOG_TMP="$(mktemp -d "${TMPDIR:-/tmp}/tokenfuzz-decisions.XXXXXX")"
+export LLM_DECIDE_LOG="$DECISION_LOG_TMP/llm-decisions.log"
+trap 'rm -rf ${CODEX_HOME_TMP:+"$CODEX_HOME_TMP"} "$DECISION_LOG_TMP"' EXIT
 
 # Container shells export AUDIT_BUILD_SUFFIX; fixtures build bare build-<san>/
 # trees. Clear it here too — python suites never source tests/helpers.sh.
