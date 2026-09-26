@@ -1079,6 +1079,13 @@ class Probe:
                     continue
                 if self.hypothesis_strategy:
                     break
+        # Agents often write the project's own name as TARGET. As a coverage
+        # pattern it matches every frame path under the checkout, so each
+        # such probe reported a HIT without reaching any named code.
+        if self.header["target"].strip().lower() in {
+            self.config.slug.lower(), Path(self.config.target_root).name.lower(),
+        }:
+            self.header["target"] = ""
         if hypothesis_row:
             self.header["target"] = self.header["target"] or str(hypothesis_row.get("file", ""))
             self.header["card"] = self.header["card"] or str(hypothesis_row.get("card_id", ""))

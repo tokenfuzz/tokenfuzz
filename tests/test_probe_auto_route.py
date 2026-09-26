@@ -113,6 +113,23 @@ class ProbeAutoRouteTests(unittest.TestCase):
         runs = (self.results / "state" / "runs.jsonl").read_text(encoding="utf-8")
         self.assertIn('"reason": "child-rc=2 class=usage"', runs)
 
+    def test_the_project_name_is_not_a_coverage_target(self) -> None:
+        # `TARGET: <project>` became a coverage pattern that every frame path
+        # under the checkout matched, so each such probe reported a HIT.
+        self.testcase.write_text(
+            "// TARGET: testproject\n// HYPOTHESIS-ID: H-slug\n// CATEGORY: state\n",
+            encoding="utf-8",
+        )
+        slug_only = self.run_probe("--dry-run")
+        self.assertIn("want= ", slug_only.stdout, slug_only.stdout + slug_only.stderr)
+        self.testcase.write_text(
+            "// TARGET: src/parse.c:app_parse:42\n// HYPOTHESIS-ID: H-slug\n"
+            "// CATEGORY: state\n",
+            encoding="utf-8",
+        )
+        located = self.run_probe("--dry-run")
+        self.assertIn("want=app_parse ", located.stdout, located.stdout + located.stderr)
+
     def test_sentinel_and_enumeration(self) -> None:
         output = self.root / "canonical.out"
         proc = subprocess.run([str(self.canonical)], capture_output=True, text=True)
