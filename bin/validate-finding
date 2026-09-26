@@ -38,7 +38,7 @@ TRIGGER_REVIEW_TURN_CAP = TRIGGER_REVIEW_TOOL_CALLS + 4
 
 def log_validator_decision(
     decision: str, status: int, prompt: str, started: float, timeout: int,
-    votes: int, total: int,
+    votes: int, total: int, capped: bool = False,
 ) -> None:
     """Put this validator session on the shared decision audit trail.
 
@@ -54,6 +54,10 @@ def log_validator_decision(
         outcome = f"FAIL rc={status}"
     elif votes:
         outcome = "FAIL partial"
+    elif capped:
+        # Stopped at the tool-call cap before answering: a budget outcome,
+        # not a malformed answer.
+        outcome = "FAIL turn-cap"
     else:
         outcome = "FAIL parse"
     llm_decide.log_decision(
@@ -487,7 +491,7 @@ def main(argv=None) -> int:
             written += 1
         log_validator_decision(
             "trigger-validator-batch", status, prompt, started, args.timeout,
-            written, len(items),
+            written, len(items), llm_invoke.session_turn_capped(raw),
         )
         llm_usage.append_usage_event(
             args.usage_index, backend=args.backend, model=args.model,
@@ -552,7 +556,7 @@ def main(argv=None) -> int:
     vote = extract_vote(text)
     log_validator_decision(
         f"{args.gate}-validator", status, prompt, started, args.timeout,
-        1 if vote is not None else 0, 1,
+        1 if vote is not None else 0, 1, llm_invoke.session_turn_capped(raw),
     )
     llm_usage.append_usage_event(
         args.usage_index, backend=args.backend, model=args.model,

@@ -134,6 +134,18 @@ class SecondLensTests(unittest.TestCase):
             SimpleNamespace(lens="reachability", **{**base, "resolve_trigger": True}), {})
         self.assertNotIn("Your lens", resolving)
 
+    def test_a_review_stopped_at_the_tool_cap_is_not_logged_as_unparsable(self) -> None:
+        loader = __import__("importlib.machinery", fromlist=["SourceFileLoader"])
+        module = loader.SourceFileLoader("validate_finding_cli", str(ROOT / "bin" / "validate-finding")).load_module()
+        outcomes = []
+        with mock.patch.object(
+            module.llm_decide, "log_decision",
+            side_effect=lambda _decision, outcome, **_kwargs: outcomes.append(outcome),
+        ):
+            module.log_validator_decision("trigger-validator", 0, "p", 0.0, 30, 0, 1, True)
+            module.log_validator_decision("trigger-validator", 0, "p", 0.0, 30, 0, 1)
+        self.assertEqual(outcomes, ["FAIL turn-cap", "FAIL parse"])
+
 
 if __name__ == "__main__":
     unittest.main()
