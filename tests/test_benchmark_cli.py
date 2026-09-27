@@ -571,6 +571,7 @@ class BenchmarkCliTests(unittest.TestCase):
         ])
         output = io.StringIO()
         with mock.patch.object(benchmark_runner, "_is_shallow_checkout", return_value=True), \
+                mock.patch.object(benchmark_runner, "check_model", return_value=""), \
                 mock.patch.object(benchmark_runner, "_run_locked", return_value=0), \
                 redirect_stdout(output), redirect_stderr(output):
             self.assertEqual(benchmark_runner.run_single(args, self.bench_root), 0)
@@ -582,6 +583,102 @@ class BenchmarkCliTests(unittest.TestCase):
         ), redirect_stdout(output), redirect_stderr(output):
             self.assertIsNone(benchmark_runner.update_live_result(self.bench_root, "test"))
         self.assertIn("live update failed (test): render failed", output.getvalue())
+
+    def _check_with(self, rc: int, lines: list[dict]) -> tuple[str, str]:
+        def launch(_backend, _prompt, _timeout, raw_log, **_kwargs):
+            Path(raw_log).write_text(
+                "".join(json.dumps(line) + "\n" for line in lines),
+                encoding="utf-8",
+            )
+            return rc
+
+        output = io.StringIO()
+        with mock.patch.dict(os.environ, {"AUDIT_MODEL_PREFLIGHT": "1"}), \
+                mock.patch.object(
+                    benchmark_runner.llm_invoke, "run_agent_prompt",
+                    side_effect=launch,
+                ), redirect_stdout(output):
+            message = benchmark_runner.check_model(
+                "codex", "sample-modl-1", "sandboxed",
+            )
+        return message, output.getvalue()
+
+    def test_model_check_refuses_a_model_the_provider_does_not_serve(self) -> None:
+        # A misspelled --model used to be found by the first cell, after the
+        # build lease, with an empty run appended to the shared result page.
+        message, _ = self._check_with(1, [{"type": "error", "message":
+            "Couldn't set model 'sample-modl-1': unknown model id"}])
+        self.assertIn("was refused before any cell started", message)
+        self.assertIn(
+            'provider said "Couldn\'t set model \'sample-modl-1\'', message,
+        )
+        self.assertIn("check the model name", message)
+
+        self.assertEqual(self._check_with(0, [{"type": "result"}])[0], "")
+        # Only a refusal stops the run. A capped, slow, or unexplained failure
+        # warns: every cell retries its own launch, and a network blip here
+        # must not cost the run.
+        for rc, lines, said in (
+            (1, [{"type": "error", "error": {
+                "code": 429, "message": "Rate limit reached for sample-modl-1"}}],
+             "capacity limited"),
+            (124, [{"type": "error", "message":
+                "Couldn't set model 'sample-modl-1': unknown model id"}], "exit 124"),
+            (1, [{"type": "error", "message":
+                "stream disconnected before completion"}], "stream disconnected"),
+        ):
+            message, output = self._check_with(rc, lines)
+            self.assertEqual(message, "")
+            self.assertIn("starting anyway", output)
+            self.assertIn(said, output)
+
+    def test_model_check_upgrades_a_codex_too_old_for_the_model(self) -> None:
+        # The audit preflight already swaps in a newer codex on PATH; the
+        # benchmark check must not refuse what that swap recovers.
+        launches = []
+
+        def launch(_backend, _prompt, _timeout, raw_log, **_kwargs):
+            launches.append(os.environ.get("CODEX_BIN"))
+            if len(launches) == 1:
+                Path(raw_log).write_text(json.dumps({"type": "error", "message":
+                    "The 'sample-modl-1' model requires a newer version of "
+                    "Codex. Please upgrade."}) + "\n", encoding="utf-8")
+                return 1
+            return 0
+
+        with mock.patch.dict(os.environ, {"AUDIT_MODEL_PREFLIGHT": "1"}), \
+                mock.patch.object(
+                    benchmark_runner.llm_invoke, "run_agent_prompt",
+                    side_effect=launch,
+                ), mock.patch.object(
+                    benchmark_runner, "newer_codex_on_path",
+                    return_value="/opt/sample/codex",
+                ), redirect_stdout(io.StringIO()):
+            os.environ.pop("CODEX_BIN", None)
+            message = benchmark_runner.check_model(
+                "codex", "sample-modl-1", "sandboxed",
+            )
+            self.assertEqual(message, "")
+            self.assertEqual(launches, [None, "/opt/sample/codex"])
+
+    def test_refused_model_stops_the_run_before_it_records_anything(self) -> None:
+        args = benchmark_runner.parser().parse_args([
+            "--target", "samples/sample-python", "--backend", "codex",
+            "--model", "sample-modl-1", "--run-id", "refused",
+        ])
+        output = io.StringIO()
+        with mock.patch.object(
+            benchmark_runner, "check_model",
+            return_value="backend=codex model=sample-modl-1 failed a one-line check",
+        ), mock.patch.object(benchmark_runner, "_run_locked") as locked, \
+                redirect_stdout(output), redirect_stderr(output):
+            self.assertEqual(benchmark_runner.run_single(args, self.bench_root), 1)
+        locked.assert_not_called()
+        self.assertIn(
+            "FATAL: backend=codex model=sample-modl-1 failed a one-line check",
+            output.getvalue(),
+        )
+        self.assertFalse((self.bench_root / "codex" / "refused").exists())
 
 
 if __name__ == "__main__":

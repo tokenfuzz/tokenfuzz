@@ -17,7 +17,7 @@ import tempfile
 import threading
 import time
 import urllib.request
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -240,6 +240,74 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
         and "asan_bin is missing (build-asan/peer-app)" in raced_err.getvalue(),
         "a pinned snapshot that no longer verifies refuses the run before any cell",
         (raced_rc, raced_err.getvalue()[-300:]),
+    )
+
+    # A misspelled --model. The console used to say only "failed after 1m23s"
+    # and then "Benchmark complete." over a 0-vs-0 summary; the provider's
+    # reason sat in a raw transcript. The refusal now names itself, stops the
+    # later cells, and the summary does not report an unmeasured zero.
+    refused_dir = backend_root / "refused-model"
+    refused_cells = refused_dir / "cells"
+    refused_cells.mkdir(parents=True)
+    refused_launched = []
+    provider_words = (
+        "There's an issue with the selected model (sample-modl-1). "
+        "It may not exist or you may not have access to it."
+    )
+
+    def _refused_harness(cell_dir, *_args, **_kwargs):
+        refused_launched.append(cell_dir.name)
+        results = cell_dir / "results"
+        raw = results.parent / "logs" / ".raw" / "model-preflight-codex-1.raw"
+        raw.parent.mkdir(parents=True)
+        raw.write_text(json.dumps({
+            "type": "result", "is_error": True, "api_error_status": 404,
+            "result": provider_words,
+        }) + "\n", encoding="utf-8")
+        (cell_dir / "audit.log").write_text(
+            f'FATAL: model preflight: provider rejected backend=codex '
+            f'model=sample-modl-1 on attempt 1: provider said "{provider_words}"\n',
+            encoding="utf-8",
+        )
+        (cell_dir / ".backend-unavailable").touch()
+        return 1, results
+
+    unmeasured = {"conditions": [{
+        "condition": "harness", "replicates_done": 0, "replicates_total": 2,
+    }]}
+    with mock.patch.object(benchmark_runner, "SCRIPT_ROOT", fake_script_root), \
+         mock.patch.object(benchmark_runner.llm_invoke, "apply_memory_policy"), \
+         mock.patch.object(benchmark_runner.target_config, "detect_rev", return_value="rev"), \
+         mock.patch.object(benchmark_runner, "_git_rev", return_value="rev"), \
+         mock.patch.object(benchmark_runner, "preflight_build", side_effect=_budget_preflight), \
+         mock.patch.object(benchmark_runner, "run_harness", side_effect=_refused_harness), \
+         mock.patch.object(benchmark_runner, "triage_cell_crashes", side_effect=_budget_crash_triage), \
+         mock.patch.object(benchmark_runner, "drain_find_gate", side_effect=_budget_drain), \
+         mock.patch.object(benchmark_runner, "update_result", return_value=unmeasured), \
+         mock.patch.object(benchmark_runner.metrics, "render_section", return_value=""), \
+         mock.patch.object(benchmark_runner.metrics, "append_to_ledger"), \
+         redirect_stdout(io.StringIO()) as refused_out, \
+         redirect_stderr(io.StringIO()):
+        refused_rc = benchmark_runner._run_locked(
+            budget_args, bench_root, backend_root, refused_dir, refused_cells,
+            backend_root / "benchmark-results.md", "refused-model", ["harness"],
+        )
+    console = refused_out.getvalue()
+    check(
+        refused_rc == 1 and refused_launched == ["harness-r1"]
+        and f"ERROR: Cell harness-r1: FATAL: model preflight: provider rejected" in console
+        and provider_words in console
+        and "the remaining cells will not start" in console
+        and "Cell harness-r2: not started" in console,
+        "a refused model names the provider's reason and stops the later cells",
+        console[-1500:],
+    )
+    check(
+        "harness: not measured — 0 of 2 replicate(s) finished" in console
+        and "crash median=" not in console
+        and "Benchmark complete." not in console,
+        "a run with no finished cell does not report a measured zero",
+        console[-800:],
     )
     check(
         drained_deadlines == [12, 12],

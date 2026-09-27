@@ -112,26 +112,34 @@ and permitted-use policy. Another model name does not lift an access
 restriction.
 
 ```text
-FATAL: model preflight: provider rejected backend=<name> model=<model> on attempt <n>; check CLI credentials and model access. Transcript: <path>
+FATAL: model preflight: provider rejected backend=<name> model=<model> on attempt <n>: provider said "<reason>"; check the model name, CLI credentials and model access. Transcript: <path>
 ```
 
-The provider refused the request: an expired login, no access to that
-model, or a safeguard refusal. Log in again and confirm the account can use
-the model. A safeguard refusal also logs `WARN: MODEL_REFUSAL`, with the
+The provider refused the request, and `<reason>` is its own explanation: a
+model name it does not serve (often a typo in `--model`), an expired login,
+no access to that model, or a safeguard refusal. Fix the name, or log in
+again and confirm the account can use the model. The harness stops after
+the first refusal instead of retrying. On every backend, a failed launch
+whose error names the requested model and says it is not found, unknown,
+or not supported counts as a refusal, whatever the rest of the CLI's
+wording. A safeguard refusal also logs `WARN: MODEL_REFUSAL`, with the
 category when the provider gives one
 (`WARN: MODEL_REFUSAL: CYBER CLASSIFIER DETECTED backend=<name> provider_reason=<reason>`);
 treat that as an access question, as above.
 
 ```text
-FATAL: model preflight failed for backend=<name> model=<model> after <n> attempt(s) (last exit=<rc>): no command of its own reached <path>, ...
+FATAL: model preflight failed for backend=<name> model=<model> after <n> attempt(s) (last exit=<rc>); no command of its own reached <path>, ...
 ```
 
 The agent launched but never wrote its marker file into the target tree.
-Read the named transcript, then run the backend CLI by hand from the
+When the provider gave a reason, the message quotes it after the exit
+code as `: provider said "<reason>"`; start there. Otherwise read the named
+transcript, then run the backend CLI by hand from the
 repository root. Usual causes:
 
-- The model name is invalid. Under Antigravity, `last exit=45` means it
-  could not resolve `--model`.
+- The model name is invalid, and the CLI's error does not name it. A
+  refusal that names the requested model reports as `provider rejected`
+  above instead.
 - The sandbox denied the write. Check the
   [agent security mode](../guides/backends.md#agent-security-modes).
 - The CLI is too old. When a Codex transcript says the provider requires a

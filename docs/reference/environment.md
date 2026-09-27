@@ -83,7 +83,7 @@ suit a shared shell or a backend binary outside `PATH`.
 | `CLAUDE_BIN`, `CODEX_BIN`, `GEMINI_BIN`, `GROK_BIN`, `OPENCODE_BIN` | `claude`, `codex`, `agy` (`gemini` when `USE_GEMINI_CLI=1`), `grok`, `opencode` | Backend executable outside `PATH`. |
 | `USE_GEMINI_CLI` | unset | `1` makes the `gemini` backend use Google Gemini CLI instead of Antigravity (`agy`). |
 | `CODEX_HOME` | `~/.codex` | Codex's home directory. TokenFuzz reads `config.toml` there to switch off your MCP servers and `notify` hook for each launch, and reads session rollouts under `sessions/` to measure usage, deleting the ones it fully resolves. |
-| `AUDIT_MODEL_PREFLIGHT` | `1` | `0` skips the [model preflight](../guides/backends.md#model-preflight), the one real agent launch that must write into the target tree before the run starts. Only for an intentionally offline or mock run. |
+| `AUDIT_MODEL_PREFLIGHT` | `1` | `0` skips the [model preflight](../guides/backends.md#model-preflight), the one real agent launch that must write into the target tree before the run starts, and the benchmark's one-line model check before its first cell. Only for an intentionally offline or mock run. |
 | `AUDIT_MODEL_PREFLIGHT_TIMEOUT` | `60` seconds (`300` for Google Gemini CLI) | Ceiling on each preflight attempt. Raise it when a slow local model never gets past startup. |
 | `AUDIT_MODEL_PREFLIGHT_ATTEMPTS` | `3` | Total preflight attempts, 15 and then 60 seconds apart. A provider refusal or a substituted model stops at once. |
 

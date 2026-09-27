@@ -1106,6 +1106,24 @@ _PROVIDER_UNSERVABLE_TEXT_RE = re.compile(
     re.IGNORECASE,
 )
 
+# The same criterion, read only from the message field a provider reserves for
+# its own error (see _event_error_text), never a whole line. There the gap may
+# cross a period: model names carry them (`gemini-2.5-pro`), and Claude closes
+# the name's sentence before saying it "may not exist". A misspelled --model
+# read as a sandbox failure until each backend's wording for it was here. On a
+# whole line the looser gap would let an audited program's own "HTTP 404 ...
+# model.gguf. File not found" halt the run.
+_PROVIDER_MODEL_UNSERVABLE_RE = re.compile(
+    _PROVIDER_UNSERVABLE_TEXT_RE.pattern + r'|model_not_found|'
+    r'model[^\n]{0,60}?(?:not found|not supported|unsupported|'
+    r'does not exist|may not exist)',
+    re.IGNORECASE,
+)
+
+# Gemini CLI's wrapper around an API failure in its result event; a tool error
+# ending the session carries other wording.
+_GEMINI_API_ERROR_PREFIX = "[API Error:"
+
 # A provider safeguard rejected the submitted prompt. Codex emits it as a
 # structured error event, followed by turn.failed. Repeating the same prompt
 # cannot clear it, so treat it like the model/credential refusals above. The
@@ -1239,6 +1257,18 @@ def _provider_issue_from_lines(
         ):
             dialect = True
 
+        # Gemini CLI reports the terminal API error only in its result event,
+        # with no status code beside it, so the model-naming wording is the
+        # whole signal there. The event is the CLI's own verdict on the
+        # session, never tool output.
+        if event_type == "result" and event.get("status") == "error":
+            message = _event_error_text(event)
+            if (
+                message.startswith(_GEMINI_API_ERROR_PREFIX)
+                and _PROVIDER_MODEL_UNSERVABLE_RE.search(message)
+            ):
+                refused = True
+
         # api_error_status is a dedicated field — trust it anywhere. Claude
         # reports every API failure through it, including on a `result` event
         # that no error-shaped rule below matches, so a refusal has to be read
@@ -1253,6 +1283,12 @@ def _provider_issue_from_lines(
             trans = trans or cls == "transient"
             refused = refused or cls == "refused"
             if cls == "bad-request" and _PROVIDER_UNSERVABLE_TEXT_RE.search(line):
+                refused = True
+            # Claude answers an unknown model with a 404. Read in its message
+            # field alone: the same line carries agent-written tool input.
+            if m.group(1) in ("400", "404") and event is not None and (
+                _PROVIDER_MODEL_UNSERVABLE_RE.search(_event_error_text(event))
+            ):
                 refused = True
 
         if is_error_event:
@@ -1322,6 +1358,173 @@ def _provider_issue_from_lines(
     if trans or (dialect and trans_plain):
         return "transient"
     return "none"
+
+
+def _event_error_text(event: dict) -> str:
+    """The provider's own error message carried by one backend event, else ''.
+
+    Read only from fields each CLI reserves for a failed request: Claude's
+    `result` beside `api_error_status`, Codex's error and turn.failed
+    `message` (which wraps the API's JSON error body), and Gemini's result
+    `error`. Never assistant prose or tool output.
+    """
+    event_type = event.get("type")
+    text = ""
+    if "api_error_status" in event:
+        text = event.get("result") or event.get("error") or ""
+    elif event_type in ("error", "turn.failed") or (
+        event_type == "result" and event.get("status") == "error"
+    ):
+        error = event.get("error")
+        if isinstance(error, dict):
+            # OpenCode nests its message one level down, under `data`.
+            data = error.get("data")
+            error = error.get("message") or (
+                data.get("message") if isinstance(data, dict) else None
+            )
+        text = event.get("message") or error or ""
+    if not isinstance(text, str):
+        return ""
+    if text.startswith("{"):
+        try:
+            body = json.loads(text)
+        except ValueError:
+            body = None
+        if isinstance(body, dict):
+            inner = body.get("error")
+            nested = (
+                inner.get("message") if isinstance(inner, dict) else None
+            ) or body.get("message") or body.get("detail")
+            if isinstance(nested, str) and nested:
+                text = nested
+    return text
+
+
+# A CLI's own error line, for quoting only — never for classification, where
+# a plain line is as often the audited program's output. Covers the uppercase
+# log level above, a bare `error:` prefix (agy, grok), and OpenCode's logfmt
+# `level=ERROR ... error="..."` records, whose quoted value is the message.
+_CLI_ERROR_TEXT_RE = re.compile(
+    _PROVIDER_ERROR_LINE_RE.pattern + r'|^\s*error:|\blevel=ERROR\b',
+    re.IGNORECASE,
+)
+_LOGFMT_ERROR_VALUE_RE = re.compile(r'\berror="((?:[^"\\]|\\.)*)"')
+
+
+def _error_texts(lines):
+    """(rank, message) for each error a transcript's CLI stated.
+
+    Rank orders how clean a quote is: 0 a structured event's message, 1 a
+    logfmt record's `error=` value, 2 a whole plain line.
+    """
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith("{"):
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(event, dict):
+                text = _event_error_text(event)
+                if text:
+                    yield 0, text
+        elif _CLI_ERROR_TEXT_RE.search(line):
+            value = _LOGFMT_ERROR_VALUE_RE.search(line)
+            yield (1, value.group(1)) if value else (2, line)
+
+
+def _bounded(text: str, limit: int) -> str:
+    text = " ".join(text.split())
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def provider_error_detail(lines, limit: int = 300) -> str:
+    """The provider's last stated reason for failing a request, or ''.
+
+    The classifier says which kind of failure a transcript holds; this says,
+    in the provider's words, what it was, so an operator is not left to infer
+    a typo from a sandbox symptom. For quoting a failed launch only.
+    """
+    detail = ""
+    for _rank, detail in _error_texts(lines):
+        pass
+    return _bounded(detail, limit)
+
+
+# Refusal wording that has to share a message with the model's name. The name
+# alone is not enough: "No capacity available for model x" and "model x is
+# loading" name a model the provider does serve.
+_UNSERVED_WORDING_RE = re.compile(
+    r'not found|not recognized|not supported|unsupported|unknown|'
+    r'does not exist|may not exist|no such model|invalid model',
+    re.IGNORECASE,
+)
+
+
+def _named(model: str):
+    """Match `model` as a whole name, not inside another token.
+
+    A leading `/` is allowed (`models/x`, `local/x`); a trailing period only
+    when it ends the sentence, since model names carry periods themselves.
+    """
+    return re.compile(
+        r'(?<![A-Za-z0-9._:-])' + re.escape(model)
+        + r'(?![A-Za-z0-9_:/-]|\.[A-Za-z0-9])',
+        re.IGNORECASE,
+    )
+
+
+def unserved_model_error(lines, model: str, limit: int = 300) -> str:
+    """The error in a failed launch refusing the requested model, or ''.
+
+    Every CLI names the model it could not serve — "selected model (x)... may
+    not exist", "The 'x' model is not supported", "models/x is not found",
+    "model x is not recognized", "Couldn't set model 'x': unknown model id",
+    "Model not found: x" — in wording no status rule keeps up with. The name
+    plus refusal wording in one message is the backend-agnostic signal.
+    """
+    wanted = (model or "").strip()
+    if not wanted:
+        return ""
+    name = _named(wanted)
+    # The cleanest quote wins when a CLI states the refusal more than once
+    # (Gemini CLI's stderr line carries a report path and a stack).
+    named = sorted(
+        (rank, index, text)
+        for index, (rank, text) in enumerate(_error_texts(lines))
+        if name.search(text) and _UNSERVED_WORDING_RE.search(text)
+    )
+    return _bounded(named[0][2], limit) if named else ""
+
+
+def launch_failure(
+    raw: Path, model: str, timed_out: bool = False,
+) -> tuple[str, str]:
+    """(provider issue, provider's words) for a launch that exited nonzero.
+
+    One verdict for every startup check, so the audit preflight and the
+    benchmark refuse the same launches. A refusal of the requested model is
+    `backend_rejected` even where no status or wording rule knows that CLI.
+    The classifier's capacity or transient verdict outranks it, and a launch
+    that timed out is never refused on wording, since it may simply be slow.
+    """
+    def lines():
+        return raw.open(encoding="utf-8", errors="replace")
+
+    try:
+        with lines() as stream:
+            issue = _provider_issue_from_lines(stream)
+        with lines() as stream:
+            named = unserved_model_error(stream, model)
+        with lines() as stream:
+            detail = named or provider_error_detail(stream)
+    except OSError:
+        return "none", ""
+    if issue == "none" and named and not timed_out:
+        issue = "backend_rejected"
+    return issue, detail
 
 
 #: Provider failures a retry or a pause can clear. `backend_rejected` is

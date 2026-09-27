@@ -26,7 +26,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import audit_helpers
-from audit_runner import CAPACITY_RETRY_SECONDS, PROVIDER_PAUSE_MAX_SECONDS
+from audit_runner import (
+    CAPACITY_RETRY_SECONDS, PROVIDER_PAUSE_MAX_SECONDS, CODEX_UPGRADE_REQUIRED,
+    newer_codex_on_path, model_preflight_timeout,
+)
 import benchmark as metrics
 import benchmark_page
 import benchmark_model_direct_render
@@ -1436,16 +1439,55 @@ def _substituted_model(cell_dir: Path, model: str) -> str:
     return llm_usage.substituted_model(cell_dir / "backend.raw.log", model)
 
 
+def _provider_logs(cell_dir: Path) -> list[Path]:
+    """Every transcript in a cell that can carry a provider's own verdict."""
+    output = cell_dir / "repo-root" / "output"
+    return [
+        cell_dir / "backend.raw.log", cell_dir / "audit.log",
+        *output.glob("**/logs/.raw/model-preflight-*.raw"),
+        *output.glob("**/logs/.raw/session_*.log.raw"),
+        *output.glob("**/logs/index.log"),
+    ]
+
+
+def _cell_failure_reason(cell_dir: Path) -> str:
+    """One line saying why a cell failed, from its own logs, else ''.
+
+    Without it the console said only "failed after 2s", and the reason — a
+    misspelled model, a revoked key — sat in a raw transcript. The nested
+    audit's FATAL line is preferred: it already quotes the provider when the
+    provider said anything. Otherwise only the launch transcripts are read:
+    a long session's last error may be one it recovered from, and the
+    harness's own ERROR lines are not the provider's words.
+    """
+    try:
+        with (cell_dir / "audit.log").open(encoding="utf-8", errors="replace") as stream:
+            fatal = [line.strip() for line in stream if line.startswith("FATAL:")]
+    except OSError:
+        fatal = []
+    if fatal:
+        return fatal[-1]
+    output = cell_dir / "repo-root" / "output"
+    for path in [
+        cell_dir / "backend.raw.log",
+        *sorted(output.glob("**/logs/.raw/model-preflight-*.raw")),
+    ]:
+        try:
+            with path.open(encoding="utf-8", errors="replace") as stream:
+                detail = audit_helpers.provider_error_detail(stream)
+        except OSError:
+            continue
+        if detail:
+            return f'last provider error: "{detail}" ({path})'
+    return ""
+
+
 def _provider_issue(cell_dir: Path, model: str = "") -> str:
     quota_marker = cell_dir / ".quota-exhausted"
     if quota_marker.is_file():
         return "capacity_limited"
     saw_capacity = saw_transient = False
-    candidates = [cell_dir / "backend.raw.log", cell_dir / "audit.log"]
-    candidates.extend((cell_dir / "repo-root" / "output").glob("**/logs/.raw/session_*.log.raw"))
-    candidates.extend((cell_dir / "repo-root" / "output").glob("**/logs/.raw/model-preflight-*.raw"))
-    candidates.extend((cell_dir / "repo-root" / "output").glob("**/logs/index.log"))
-    for path in candidates:
+    for path in _provider_logs(cell_dir):
         try:
             with path.open(encoding="utf-8", errors="replace") as stream:
                 issue = audit_helpers._provider_issue_from_lines(stream)
@@ -3409,17 +3451,91 @@ def run_single(args: argparse.Namespace, bench_root: Path) -> int:
     # same-target run would unnecessarily prevent same-backend comparisons.
     lock_name = f".run-{target_key(run_id)}.lock"
     with BenchmarkLock(backend_root / lock_name):
-        bench_dir.mkdir(parents=True, exist_ok=True)
-        cells_dir.mkdir(parents=True, exist_ok=True)
         previous = _recorded_run(bench_dir)
         problem = _resolve_run_agent_security(args, previous)
         if problem:
             print(f"FATAL: {problem}", file=sys.stderr)
             return 1
+        if not args.dry_run and not args.regenerate:
+            refused = check_model(
+                args.backend, args.model or llm_invoke.default_model(args.backend),
+                args.agent_security,
+            )
+            if refused:
+                print(f"FATAL: {refused}", file=sys.stderr)
+                return 1
+        bench_dir.mkdir(parents=True, exist_ok=True)
+        cells_dir.mkdir(parents=True, exist_ok=True)
         console_path = bench_dir / "console.log"
         with _agent_security_environment(args.agent_security):
             with console_path.open("a", encoding="utf-8") as console, redirect_stdout(Tee(sys.stdout, console)), redirect_stderr(Tee(sys.stderr, console)), _build_suffix(_resolve_build_suffix(args, previous)):
                 return _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, run_id, conditions, previous)
+
+
+def check_model(backend: str, model: str, agent_security: str) -> str:
+    """Why the provider refuses `model`, or '' when nothing says it does.
+
+    One short launch before anything is built, leased, or written. A wrong
+    --model used to be found by the first cell, after the build lease, with
+    triage and the find-gate run over nothing and an empty run appended to
+    the shared result page and ledger. Only a refusal stops the run: any
+    other failure warns and starts, since each cell retries its own launch
+    and a network blip here must not cost the run. A Codex CLI too old for
+    the model is swapped for a newer one on PATH, as the audit preflight
+    does, and the swap reaches every cell. AUDIT_MODEL_PREFLIGHT=0 skips it.
+    """
+    if os.environ.get("AUDIT_MODEL_PREFLIGHT", "1") == "0":
+        return ""
+    llm_invoke.apply_memory_policy(False)
+    scratch = Path(tempfile.mkdtemp(prefix="benchmark-model-check-"))
+    raw = scratch / f"model-check-{backend}.raw"
+    upgraded = False
+    while True:
+        try:
+            rc = llm_invoke.run_agent_prompt(
+                backend, "Reply with the single word OK.",
+                model_preflight_timeout(backend), raw, model=model,
+                max_turns=2, add_dirs=str(scratch), cwd=scratch,
+                agent_security=agent_security,
+            )
+        except (OSError, ValueError) as exc:
+            return f"backend={backend} model={model} could not be launched: {exc}"
+        if rc == 0:
+            shutil.rmtree(scratch, ignore_errors=True)
+            return ""
+        if backend == "codex" and not upgraded:
+            try:
+                transcript = raw.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                transcript = ""
+            replacement = (
+                newer_codex_on_path()
+                if CODEX_UPGRADE_REQUIRED in transcript else ""
+            )
+            if replacement:
+                os.environ["CODEX_BIN"] = replacement
+                upgraded = True
+                log(
+                    "Model check: provider requires a newer Codex CLI; "
+                    f"using {replacement} for this run"
+                )
+                continue
+        break
+    issue, said = audit_helpers.launch_failure(raw, model, timed_out=rc == 124)
+    quoted = f': provider said "{said}"' if said else ""
+    if issue != "backend_rejected":
+        log(
+            f"WARN: model check for backend={backend} model={model} failed "
+            f"(exit {rc}{', ' + issue.replace('_', ' ') if issue != 'none' else ''})"
+            f"{quoted}; starting anyway, each cell retries its own launch. "
+            f"Transcript: {raw}"
+        )
+        return ""
+    return (
+        f"backend={backend} model={model} was refused before any cell "
+        f"started (exit {rc}){quoted}; check the model name, CLI credentials "
+        f"and model access. Nothing was built or recorded. Transcript: {raw}"
+    )
 
 
 def _resolve_run_agent_security(args: argparse.Namespace, previous: dict) -> str:
@@ -3875,6 +3991,8 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                     # or failed — trading it for a real measurement.
                     log(f"Cell {name}: prior run {prior.get('run_quality') or prior['status']}; retrying")
                 if provider_unavailable:
+                    log(f"Cell {name}: not started — the backend was unavailable "
+                        "to an earlier cell (see the ERROR above)")
                     cell_dir.mkdir(parents=True, exist_ok=True)
                     (cell_dir / ".backend-unavailable").touch()
                     (cell_dir / ".run-quality").write_text("provider_limited\n", encoding="utf-8")
@@ -4151,6 +4269,19 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                         )
                     else:
                         log(f"Cell {name} {status} after {format_duration(wall)}; see {cell_dir}")
+                    unavailable = (cell_dir / ".backend-unavailable").is_file()
+                    if status == "failed" or unavailable:
+                        reason = _cell_failure_reason(cell_dir) or (
+                            "no provider or harness error was recorded; read "
+                            "the cell's logs"
+                        )
+                        log(f"ERROR: Cell {name}: {reason}")
+                    if unavailable:
+                        log(
+                            f"ERROR: backend={args.backend} model={model or '?'} "
+                            "is unavailable; the remaining cells will not start. "
+                            "Fix the cause above, then rerun."
+                        )
                 update_live_result(bench_root, f"after {name}")
                 log(f"Cell {name}: metrics saved; pooled finalization deferred")
         log(f"Cells complete: {done} done, {failed} failed")
@@ -4340,10 +4471,20 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
     print()
     log(f"Run {run_id} summary:")
     for condition in report.get("conditions", []):
-        print(
-            f"  {condition.get('condition')}: crash median={condition.get('crash_median', 0)} "
-            f"finding total={condition.get('confirmed_finding_total', 0)}"
-        )
+        measured = condition.get("replicates_done", 0)
+        total = condition.get("replicates_total", 0)
+        if measured:
+            print(
+                f"  {condition.get('condition')}: crash median={condition.get('crash_median', 0)} "
+                f"finding total={condition.get('confirmed_finding_total', 0)} "
+                f"({measured} of {total} replicate(s) finished)"
+            )
+        else:
+            # A zero median over no finished cell reads as a measured zero.
+            print(
+                f"  {condition.get('condition')}: not measured — 0 of {total} "
+                f"replicate(s) finished"
+            )
         for observed in condition.get("incomplete_observed", []):
             print(
                 f"    {observed.get('cell')}: incomplete — observed "
@@ -4373,8 +4514,12 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
         collected = _collect_isolated_builds(target_root, bench_root, build_suffix)
         if collected:
             log(f"Collected {collected} isolated build tree(s) no run refers to")
+    if failed:
+        log(f"Benchmark finished with {failed} failed or excluded cell(s); "
+            "see the ERROR lines above.")
+        return 1
     log("Benchmark complete.")
-    return 1 if failed else 0
+    return 0
 
 
 def _main(argv: list[str] | None = None) -> int:

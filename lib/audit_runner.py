@@ -78,7 +78,7 @@ PROVIDER_PAUSE_MAX_SECONDS = 6 * 60 * 60
 CAPACITY_RETRY_SECONDS = 30 * 60
 TRANSIENT_RETRY_MAX = 6
 _OWNED_INSTANCE_LOCKS: set[Path] = set()
-_CODEX_UPGRADE_REQUIRED = "requires a newer version of Codex"
+CODEX_UPGRADE_REQUIRED = "requires a newer version of Codex"
 
 
 def _agent_timeout() -> int:
@@ -531,7 +531,7 @@ def _codex_version(binary: str) -> tuple[int, ...]:
     return tuple(int(part) for part in match.group(1).split(".")) if match else ()
 
 
-def _newer_codex_on_path() -> str:
+def newer_codex_on_path() -> str:
     """Find a newer same-name CLI already exposed by the operator's PATH."""
     if os.environ.get("CODEX_BIN"):
         return ""
@@ -560,6 +560,12 @@ def _newer_codex_on_path() -> str:
     return str(max(candidates, key=lambda path: candidates[path]))
 
 
+def model_preflight_timeout(backend: str) -> int:
+    """Seconds one startup launch may take (AUDIT_MODEL_PREFLIGHT_TIMEOUT)."""
+    default = "300" if backend == "gemini" and llm_invoke.use_gemini_cli() else "60"
+    return int(os.environ.get("AUDIT_MODEL_PREFLIGHT_TIMEOUT", default))
+
+
 def validate_model(runtime: Runtime, audit_guide: str = "") -> None:
     """Exercise the requested model through the same tool-capable launch path.
 
@@ -574,8 +580,7 @@ def validate_model(runtime: Runtime, audit_guide: str = "") -> None:
     if os.environ.get("AUDIT_MODEL_PREFLIGHT", "1") == "0":
         return
     try:
-        default_timeout = "300" if runtime.backend == "gemini" and llm_invoke.use_gemini_cli() else "60"
-        timeout_secs = int(os.environ.get("AUDIT_MODEL_PREFLIGHT_TIMEOUT", default_timeout))
+        timeout_secs = model_preflight_timeout(runtime.backend)
         attempts = int(os.environ.get("AUDIT_MODEL_PREFLIGHT_ATTEMPTS", "3"))
     except ValueError as exc:
         raise ValueError("model preflight timeout and attempts must be integers") from exc
@@ -640,12 +645,12 @@ def validate_model(runtime: Runtime, audit_guide: str = "") -> None:
                 agent_security=runtime.agent_security,
             )
             rejected = False
+            said = ""
             if last_rc != 0 and raw.is_file():
-                with raw.open(encoding="utf-8", errors="replace") as transcript_lines:
-                    rejected = (
-                        audit_helpers._provider_issue_from_lines(transcript_lines)
-                        == "backend_rejected"
-                    )
+                issue, said = audit_helpers.launch_failure(
+                    raw, runtime.model, timed_out=last_rc == 124,
+                )
+                rejected = issue == "backend_rejected"
             if not rejected:
                 # A refused request was never served; an estimated row for it
                 # would price tokens no provider consumed.
@@ -664,8 +669,12 @@ def validate_model(runtime: Runtime, audit_guide: str = "") -> None:
                 and "Failed to resolve model flag" in agy_log.read_text(encoding="utf-8", errors="replace")
             )
             if unresolved_model:
+                # Its log is the only witness when agy falls back to its saved
+                # model: that launch exits 0 and even acts. Refused like any
+                # other unserved model, with no retry and the run marked.
                 last_rc = 45
-                break
+                rejected = True
+                said = said or f"agy could not resolve --model {runtime.model}"
             if runtime.backend == "gemini" and llm_invoke.use_gemini_cli() \
                     and llm_invoke.gemini_admin_policy_dropped(raw):
                 # Gemini CLI discards every --admin-policy, silently for the
@@ -727,8 +736,8 @@ def validate_model(runtime: Runtime, audit_guide: str = "") -> None:
                     transcript = raw.read_text(encoding="utf-8", errors="replace")
                 except OSError:
                     transcript = ""
-                if _CODEX_UPGRADE_REQUIRED in transcript:
-                    replacement = _newer_codex_on_path()
+                if CODEX_UPGRADE_REQUIRED in transcript:
+                    replacement = newer_codex_on_path()
                     if not replacement:
                         break
                     os.environ["CODEX_BIN"] = replacement
@@ -748,7 +757,8 @@ def validate_model(runtime: Runtime, audit_guide: str = "") -> None:
                 )
                 raise RuntimeError(
                     f"model preflight: provider rejected backend={runtime.backend} "
-                    f"model={runtime.model} on attempt {attempt}; check CLI "
+                    f"model={runtime.model} on attempt {attempt}"
+                    f"{_quoted(said)}; check the model name, CLI "
                     f"credentials and model access. Transcript: {raw}"
                 )
             if attempt < attempts:
@@ -763,13 +773,21 @@ def validate_model(runtime: Runtime, audit_guide: str = "") -> None:
                 os.environ["AGY_LOG_FILE"] = prior_agy_log
         sentinel.unlink(missing_ok=True)
 
+    # Lead with what the provider said when it said anything: an agent that
+    # never acted is the symptom of every launch failure, and naming only the
+    # symptom sent an operator with a misspelled model to the sandbox.
     message = (
         f"model preflight failed for backend={runtime.backend} "
         f"model={runtime.model} after {attempts} attempt(s) (last exit="
-        f"{last_rc}): no command of its own reached {sentinel.parent}, so the "
-        f"audit would spend its wall unable to act; transcript: {raw}"
+        f"{last_rc}){_quoted(said)}; no command of its own reached "
+        f"{sentinel.parent}, so the audit would spend its wall unable to act; "
+        f"transcript: {raw}"
     )
     raise RuntimeError(message)
+
+
+def _quoted(said: str) -> str:
+    return f': provider said "{said}"' if said else ""
 
 
 def _delta_record(delta: workqueue.DeltaScope | None) -> dict | None:

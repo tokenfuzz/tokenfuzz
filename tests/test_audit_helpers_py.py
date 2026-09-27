@@ -713,6 +713,72 @@ provider_cases = [
         "backend_rejected",
         "provider-issue: a plain CLI line naming the revoked credential is a refusal",
     ),
+    (
+        # A misspelled --model. Claude closes the name's sentence before
+        # saying it may not exist; this read as a sandbox failure and cost a
+        # benchmark three timed preflight retries per cell.
+        [{"type": "result", "is_error": True, "api_error_status": 404,
+          "result": "There's an issue with the selected model (sample-modl-1). "
+                    "It may not exist or you may not have access to it."}],
+        "backend_rejected",
+        "provider-issue: a 404 naming a model that may not exist is a refusal",
+    ),
+    (
+        # Gemini CLI puts the API error only in its result event, with no
+        # status beside it, and model names carry periods.
+        [{"type": "init", "model": "gemini-9.5-nope"},
+         {"type": "result", "status": "error", "error": {
+             "type": "unknown",
+             "message": "[API Error: models/gemini-9.5-nope is not found for "
+                        "API version v1beta, or is not supported for "
+                        "generateContent.]"}}],
+        "backend_rejected",
+        "provider-issue: a gemini result naming an unknown model is a refusal",
+    ),
+    (
+        [{"type": "result", "is_error": True, "api_error_status": 404,
+          "result": "Not Found"}],
+        "none",
+        "provider-issue: a bare 404 without model wording is not a refusal",
+    ),
+    (
+        [{"type": "result", "status": "error", "error": {
+            "type": "FatalTurnLimitedError", "message": "turn limit"}}],
+        "none",
+        "provider-issue: a gemini turn-limit result is not a refusal",
+    ),
+    (
+        # The audited program's own lookup failure, relayed as tool output.
+        [{"type": "item.completed", "item": {"type": "command_execution",
+          "aggregated_output": "error: model_not_found: model sample does not exist"}}],
+        "none",
+        "provider-issue: target output cannot spoof a missing-model refusal",
+    ),
+    (
+        # An ML target fetching its own model files through a plain-text
+        # backend. The loose missing-model wording is read only in a
+        # provider's message field, and 404 only in api_error_status.
+        ["ERROR: HTTP 404 fetching https://example.test/sample/model.gguf. File not found",
+         "ERROR: status 404: model directory /tmp/models/sample not found",
+         "ERROR: HTTP 400 while loading model config.json. Tokenizer not found"],
+        "none",
+        "provider-issue: a target's own missing-model-file errors are not a refusal",
+    ),
+    (
+        # The api_error_status line also carries agent-written tool input.
+        [{"type": "result", "is_error": True, "api_error_status": 400,
+          "result": "prompt is too long",
+          "permission_denials": [{"tool_input": {
+              "query": "sample model loader. Error: file not found"}}]}],
+        "none",
+        "provider-issue: agent tool input beside a claude API error is not the provider",
+    ),
+    (
+        [{"type": "result", "status": "error", "error": {
+            "message": "Error executing tool read_file: /src/model/io.c not found"}}],
+        "none",
+        "provider-issue: a gemini session ending on a tool error is not a refusal",
+    ),
 ]
 
 for rows, expected, name in provider_cases:
@@ -732,6 +798,166 @@ for rows, expected, name in provider_cases:
 
 proc = run(["provider-issue", "/nonexistent/path-that-cannot-exist.log"])
 assert_eq("none", proc.stdout.strip(), "provider-issue: missing log returns none")
+
+
+# ── provider_error_detail ──────────────────────────────────────────
+print("\nprovider_error_detail")
+detail_cases = [
+    (
+        [{"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "ERROR: model does not exist"}]}},
+         {"type": "result", "is_error": True, "api_error_status": 404,
+          "result": "There's an issue with the selected model (sample-modl-1)."}],
+        "There's an issue with the selected model (sample-modl-1).",
+        "provider-detail: claude's result beside api_error_status, not prose",
+    ),
+    (
+        # Codex wraps the API's JSON error body in the event's message.
+        [{"type": "error", "message": json.dumps({
+            "type": "error", "status": 400, "error": {
+                "type": "invalid_request_error",
+                "message": "The 'sample-modl-1' model is not supported."}})}],
+        "The 'sample-modl-1' model is not supported.",
+        "provider-detail: codex's nested API error message is unwrapped",
+    ),
+    (
+        [{"type": "result", "status": "error", "error": {
+            "message": "[API Error: models/sample-modl-1 is not found]"}}],
+        "[API Error: models/sample-modl-1 is not found]",
+        "provider-detail: gemini's result error message",
+    ),
+    (
+        [{"type": "item.completed", "item": {"type": "command_execution",
+          "aggregated_output": "model_not_found"}},
+         {"type": "result", "status": "success"}],
+        "",
+        "provider-detail: tool output is never the provider's reason",
+    ),
+]
+for rows, expected, name in detail_cases:
+    lines = [json.dumps(row) + "\n" for row in rows]
+    assert_eq(expected, audit_helpers.provider_error_detail(lines), name)
+assert_eq(
+    "x" * 9 + "…",
+    audit_helpers.provider_error_detail(
+        [json.dumps({"type": "error", "message": "x" * 50})], limit=10,
+    ),
+    "provider-detail: a long reason is bounded",
+)
+
+
+# ── launch_failure / unserved_model_error ──────────────────────────
+# One failed launch per backend with a misspelled model, in the shape each CLI
+# actually writes. No status or wording rule knows every one of them; naming
+# the requested model is what they share.
+print("\nlaunch_failure")
+unserved_launches = [
+    ("claude", [json.dumps({
+        "type": "result", "is_error": True, "api_error_status": 404,
+        "result": "There's an issue with the selected model (sample-modl-1). "
+                  "It may not exist or you may not have access to it."})],
+     "There's an issue with the selected model (sample-modl-1). "
+     "It may not exist or you may not have access to it."),
+    ("codex", [json.dumps({"type": "turn.failed", "error": {"message": json.dumps({
+        "type": "error", "status": 400, "error": {
+            "type": "invalid_request_error",
+            "message": "The 'sample-modl-1' model is not supported."}})}})],
+     "The 'sample-modl-1' model is not supported."),
+    ("agy", ['error: invalid model selection (--model "sample-modl-1" --effort ""): '
+             "model sample-modl-1 is not recognized as a known model",
+             "Available models:", "  Sample Model (High)"],
+     'error: invalid model selection (--model "sample-modl-1" --effort ""): '
+     "model sample-modl-1 is not recognized as a known model"),
+    ("gemini-cli", [
+        "Error when talking to Gemini API Full report available at: /tmp/r.json "
+        "ModelNotFoundError: models/sample-modl-1 is not found",
+        json.dumps({"type": "result", "status": "error", "error": {
+            "message": "[API Error: models/sample-modl-1 is not found]"}})],
+     "[API Error: models/sample-modl-1 is not found]"),
+    ("grok", [json.dumps({"type": "error", "message":
+        "Couldn't set model 'sample-modl-1': Invalid params: \"unknown model id\"."}),
+        "Error: Couldn't set model 'sample-modl-1': Invalid params."],
+     "Couldn't set model 'sample-modl-1': Invalid params: \"unknown model id\"."),
+    ("opencode", [
+        'timestamp=2026-01-01T00:00:00Z level=ERROR run=1 message="share '
+        'subscriber failed" cause="Cause([Fail(Model not found: sample-modl-1)])"',
+        'timestamp=2026-01-01T00:00:00Z level=ERROR run=1 message=failed '
+        'error="ProviderModelNotFoundError: Model not found: sample-modl-1."',
+        json.dumps({"type": "error", "error": {"name": "UnknownError", "data": {
+            "message": "Unexpected server error. Check server logs for details."}}})],
+     "ProviderModelNotFoundError: Model not found: sample-modl-1."),
+]
+with tempfile.TemporaryDirectory() as launch_dir:
+    for name, lines, words in unserved_launches:
+        raw = Path(launch_dir) / f"{name}.raw"
+        raw.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        assert_eq(
+            ("backend_rejected", words),
+            audit_helpers.launch_failure(raw, "sample-modl-1"),
+            f"launch-failure: {name} refusing a misspelled model is a refusal",
+        )
+    # A rate-limit notice names the model too; capacity outranks the name.
+    capped = Path(launch_dir) / "capped.raw"
+    capped.write_text(json.dumps({"type": "error", "error": {
+        "code": 429, "message": "Rate limit reached for sample-modl-1."}}) + "\n",
+        encoding="utf-8")
+    assert_eq(
+        "capacity_limited",
+        audit_helpers.launch_failure(capped, "sample-modl-1")[0],
+        "launch-failure: a rate limit naming the model is still capacity",
+    )
+    # A launch failure that does not name the model is quoted, not refused.
+    other = Path(launch_dir) / "other.raw"
+    other.write_text(json.dumps({"type": "error", "message": "sample hiccup"})
+                     + "\n", encoding="utf-8")
+    assert_eq(
+        ("none", "sample hiccup"),
+        audit_helpers.launch_failure(other, "sample-modl-1"),
+        "launch-failure: an unrelated error is quoted but not a refusal",
+    )
+    # A served model named in a failure that is not a refusal: capacity with
+    # no status beside it, a local model still loading, a refused connection.
+    for words in (
+        "[API Error: No capacity available for model sample-modl-1 on the server]",
+        "model sample-modl-1 is loading",
+        "connect ECONNREFUSED 127.0.0.1:8000 for local/sample-modl-1",
+    ):
+        served = Path(launch_dir) / "served.raw"
+        served.write_text(json.dumps({"type": "result", "status": "error",
+                                      "error": {"message": words}}) + "\n",
+                          encoding="utf-8")
+        assert_eq(
+            "none", audit_helpers.launch_failure(served, "sample-modl-1")[0],
+            f"launch-failure: not a refusal — {words[:40]}",
+        )
+    # The name is a whole token, not a substring of an id or a word.
+    short = Path(launch_dir) / "short.raw"
+    short.write_text(json.dumps({"type": "error", "message":
+        "request req_7Ho3xk failed: endpoint not found"}) + "\n", encoding="utf-8")
+    assert_eq(
+        "none", audit_helpers.launch_failure(short, "o3")[0],
+        "launch-failure: a short model name inside another token is not named",
+    )
+    # A slow launch is never refused on the model's name alone.
+    slow = Path(launch_dir) / "slow.raw"
+    slow.write_text(json.dumps({"type": "error", "message":
+        "Couldn't set model 'sample-modl-1': unknown model id"}) + "\n",
+        encoding="utf-8")
+    assert_eq(
+        "none",
+        audit_helpers.launch_failure(slow, "sample-modl-1", timed_out=True)[0],
+        "launch-failure: a timed-out launch is not refused on the model's name",
+    )
+    assert_eq(
+        "",
+        audit_helpers.unserved_model_error(
+            [json.dumps({"type": "item.completed", "item": {
+                "type": "error",
+                "message": "Model metadata for `sample-modl-1` not found."}})],
+            "sample-modl-1",
+        ),
+        "unserved-model: a CLI's own advisory item is not a refusal",
+    )
 
 
 # ── finish-fields ──────────────────────────────────────────────────

@@ -625,8 +625,18 @@ Both conditions pause for provider-withheld capacity for up to six hours
 budget nor `Wall (h)`. A direct session the provider cuts off is re-entered
 with the wall it had left; one the pause cannot bring back is excluded rather
 than scored short, and a resume reruns it. Once one cell hits a limit that
-never cleared, the run marks its remaining cells provider-limited without
-launching them.
+never cleared, or the provider refuses the backend or model outright, the
+run marks its remaining cells provider-limited without launching them. The
+console prints an `ERROR: Cell <name>:` line with the reason, quoting the
+provider when it gave one.
+
+Before building or recording anything, a run sends the model one short
+request. A model the provider refuses, such as a misspelled `--model`,
+stops the run there with `FATAL: backend=<name> model=<model> was refused
+before any cell started`, quoting the provider, and leaves no run
+directory. Any other failure at that point only warns, because each cell
+retries its own launch. `AUDIT_MODEL_PREFLIGHT=0` skips the check along
+with the audit's model preflight.
 
 ### Regenerating results after code changes
 

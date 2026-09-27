@@ -1673,6 +1673,137 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         "a refused preflight records no estimated usage the provider never served",
     )
 
+    # A misspelled --model is refused as surely as a revoked key. It used to
+    # retry three times and then blame the sandbox ("no command of its own
+    # reached ..."), so the message has to carry the provider's own words.
+    model_runtime.backend = "claude"
+    model_runtime.model = "sample-modl-1"
+    typo_attempts = []
+
+    def _unknown_model(_backend, _prompt, _timeout, raw_log, **_kwargs):
+        typo_attempts.append(None)
+        Path(raw_log).write_text(
+            json.dumps({
+                "type": "result", "is_error": True, "api_error_status": 404,
+                "result": "There's an issue with the selected model "
+                          "(sample-modl-1). It may not exist or you may not "
+                          "have access to it.",
+            }) + "\n",
+            encoding="utf-8",
+        )
+        return 1
+
+    with mock.patch.dict(
+        os.environ, {"AUDIT_MODEL_PREFLIGHT_ATTEMPTS": "3"}, clear=False,
+    ), mock.patch.object(
+        audit_runner.llm_invoke, "run_agent_prompt", side_effect=_unknown_model,
+    ), mock.patch.object(audit_runner.time, "sleep") as typo_sleep:
+        try:
+            audit_runner.validate_model(model_runtime)
+            unknown_model_message = ""
+        except RuntimeError as exc:
+            unknown_model_message = str(exc)
+    check(
+        len(typo_attempts) == 1 and not typo_sleep.called
+        and "provider rejected" in unknown_model_message
+        and "It may not exist" in unknown_model_message
+        and (model_runtime.logs / ".backend-unavailable").is_file(),
+        "model preflight stops at once on an unknown model and quotes the provider",
+    )
+
+    # A failure the classifier cannot name still quotes the provider when it
+    # gave a reason, ahead of the never-acted symptom.
+    def _unclassified_error(_backend, _prompt, _timeout, raw_log, **_kwargs):
+        Path(raw_log).write_text(
+            json.dumps({"type": "error", "message": "sample backend hiccup"})
+            + "\n",
+            encoding="utf-8",
+        )
+        return 1
+
+    with mock.patch.dict(
+        os.environ, {"AUDIT_MODEL_PREFLIGHT_ATTEMPTS": "1"}, clear=False,
+    ), mock.patch.object(
+        audit_runner.llm_invoke, "run_agent_prompt",
+        side_effect=_unclassified_error,
+    ):
+        try:
+            audit_runner.validate_model(model_runtime)
+            unclassified_message = ""
+        except RuntimeError as exc:
+            unclassified_message = str(exc)
+    check(
+        'provider said "sample backend hiccup"' in unclassified_message
+        and "no command of its own reached" in unclassified_message,
+        "a failed preflight quotes the provider's stated reason",
+    )
+
+    # A CLI whose refusal wording no rule knows still names the model it
+    # could not serve; that alone refuses the launch without a retry.
+    named_attempts = []
+
+    def _names_model(_backend, _prompt, _timeout, raw_log, **_kwargs):
+        named_attempts.append(None)
+        Path(raw_log).write_text(
+            json.dumps({"type": "error", "message":
+                "Couldn't set model 'sample-modl-1': unknown model id"}) + "\n",
+            encoding="utf-8",
+        )
+        return 1
+
+    with mock.patch.dict(
+        os.environ, {"AUDIT_MODEL_PREFLIGHT_ATTEMPTS": "3"}, clear=False,
+    ), mock.patch.object(
+        audit_runner.llm_invoke, "run_agent_prompt", side_effect=_names_model,
+    ), mock.patch.object(audit_runner.time, "sleep") as named_sleep:
+        try:
+            audit_runner.validate_model(model_runtime)
+            named_message = ""
+        except RuntimeError as exc:
+            named_message = str(exc)
+    check(
+        len(named_attempts) == 1 and not named_sleep.called
+        and "provider rejected" in named_message
+        and "Couldn't set model 'sample-modl-1'" in named_message,
+        "a launch failure naming the requested model is refused on any backend",
+    )
+
+    # agy can fall back to its saved model on a name it cannot resolve: the
+    # launch exits 0 and even acts, and only its log says so. That is the
+    # same refusal, not a pass and not three retries.
+    model_runtime.backend = "gemini"
+    (model_runtime.logs / ".backend-unavailable").unlink(missing_ok=True)
+
+    def _agy_fallback(_backend, prompt_text, _timeout, raw_log, **_kwargs):
+        token, sentinel = _preflight_command(prompt_text)
+        Path(sentinel).write_text(token, encoding="utf-8")
+        Path(raw_log).write_text("OK\n", encoding="utf-8")
+        Path(os.environ["AGY_LOG_FILE"]).write_text(
+            "Failed to resolve model flag\n", encoding="utf-8",
+        )
+        return 0
+
+    with mock.patch.dict(
+        os.environ,
+        {"AUDIT_MODEL_PREFLIGHT_ATTEMPTS": "3", "USE_GEMINI_CLI": "0"},
+        clear=False,
+    ), mock.patch.object(
+        audit_runner.llm_invoke, "run_agent_prompt", side_effect=_agy_fallback,
+    ), mock.patch.object(audit_runner.time, "sleep") as agy_sleep:
+        try:
+            audit_runner.validate_model(model_runtime)
+            agy_message = ""
+        except RuntimeError as exc:
+            agy_message = str(exc)
+    check(
+        not agy_sleep.called and "provider rejected" in agy_message
+        and "could not resolve --model sample-modl-1" in agy_message
+        and (model_runtime.logs / ".backend-unavailable").is_file(),
+        "an agy fallback from an unresolved model is refused, not passed",
+    )
+    model_runtime.backend = "codex"
+    model_runtime.model = "gpt-6-sol"
+
     def _recovered_auth(_backend, prompt_text, _timeout, raw_log, **_kwargs):
         token, sentinel = _preflight_command(prompt_text)
         Path(sentinel).write_text(token, encoding="utf-8")

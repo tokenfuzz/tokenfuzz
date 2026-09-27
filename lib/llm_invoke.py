@@ -1170,7 +1170,10 @@ def agent_flags(
         flags = ["run", "--pure", "--auto"]
         if resolved_model:
             flags += ["--model", opencode_model_ref(resolved_model)]
-        flags += ["--format", "json"]
+        # Its JSON stream reports a missing model only as "Unexpected server
+        # error"; the error log names it. Error level adds nothing to a
+        # healthy session.
+        flags += ["--format", "json", "--print-logs", "--log-level", "ERROR"]
         return flags
 
     if backend == "gemini":

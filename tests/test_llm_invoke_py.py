@@ -241,7 +241,7 @@ with mock.patch.dict(os.environ, {inv.AGENT_SECURITY_ENV: "external-bypass"}):
 proc = run(["agent-flags", "oss"], check=True)
 f = flags(proc)
 assert_eq(
-    ["run", "--pure", "--auto", "--format", "json"],
+    ["run", "--pure", "--auto", "--format", "json", "--print-logs", "--log-level", "ERROR"],
     f,
     "oss agent flags do not invent a model when none is supplied",
 )

@@ -116,10 +116,12 @@ class BenchmarkCellTests(unittest.TestCase):
 
     @staticmethod
     def run_command(command: list[str], environment: dict[str, str], cwd: Path | None = None):
+        # The fake backends script what a cell sees, failures included; the
+        # run's one-line model check would stop those runs before any cell.
         return subprocess.run(
             command,
             cwd=cwd,
-            env=environment,
+            env=environment | {"AUDIT_MODEL_PREFLIGHT": "0"},
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
