@@ -509,6 +509,18 @@ class SharedPolicyAgreementTests(unittest.TestCase):
                 self.assertNotIn("BOTH quantif", body)
                 self.assertNotIn("resource-exhaustion bugs", body)
 
+    def test_a_release_only_bug_cites_its_supported_configuration(self) -> None:
+        # Both gates accept a bug that exists only once an assert is compiled
+        # out when the project makes that build supported. Neither reporter
+        # was told to cite it: both conditions filed a planted release-build
+        # overflow without the citation, and all three reports were rejected.
+        for name in ("safety_framing.md.j2", "benchmark_model_direct.md.j2"):
+            with self.subTest(prompt=name):
+                self.assertIn(
+                    "makes that release configuration a supported one",
+                    self.read("lib", "prompts", name),
+                )
+
     def test_application_supplied_reaches_the_scorer_from_author_docs(self) -> None:
         # Scoring must not depend on the bounded triage fill-in pass: the
         # agent needs the value in its own vocabulary and bin/severity has to

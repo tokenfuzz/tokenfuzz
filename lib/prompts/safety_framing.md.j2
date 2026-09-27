@@ -127,7 +127,10 @@ or `__assert_fail` in the trace), any `[A-Z_]*(?:ASSERT|CHECK)` macro the
 project compiles out in release, or Rust `debug_assert!`. Such a hit goes to
 `findings/` at most, and only when you can name the unchecked
 OOB, UAF, type confusion, or boundary cross that follows once the assert is
-compiled out. The same rule applies to FINDINGs.
+compiled out, and cite the build file or documentation line that makes that
+release configuration a supported one; a rebuild with other flags shows the
+consequence, not that the configuration ships. The same rule applies to
+FINDINGs.
 
 **Build sanitizer trees as optimized release builds with symbols:** `-O2 -g1
 -DNDEBUG` (plain `-g` also works) with the sanitizer flags in compile and link

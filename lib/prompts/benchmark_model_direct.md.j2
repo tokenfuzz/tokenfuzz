@@ -184,7 +184,9 @@ are no-ops in the shipped binary, so an abort on one of them is a
 **robustness signal, not a security bug**. Do not file it as a CRASH
 or FIND unless you can name the unchecked OOB / UAF / type-confusion
 or boundary cross that follows in release when the assert is
-compiled out.
+compiled out, and cite the build file or documentation line that
+makes that release configuration a supported one; a rebuild with
+other flags shows the consequence, not that the configuration ships.
 
 ## Primary objective
 
