@@ -1,5 +1,335 @@
 # Changelog
 
+## 1.6.3 - 2026-09-26
+
+The last campaign kept recording runs that proved nothing: testcases that
+never executed read CLEAN and retired cards, a crash the target hit before
+reading any input counted as evidence, and coverage named after the project
+matched every frame. This release makes a probe verdict mean what it says,
+teaches the harness Go's own fault reports, and lets a harness link every
+library a multi-library project publishes. Gates run after the wall now use
+the results tree's own threat model, artifacts two agents happened to name
+alike stop overwriting each other, and unjudged work reads as pending
+instead of published. Codex sessions no longer start the operator's MCP
+servers, Claude sessions no longer load the operator's settings files, and
+the handbook has been checked line by line against the code.
+
+### Probe verdicts
+
+- **A testcase that could not run says so, on every strategy.** Only S7 and
+  S8 told agents to print `NO_EXEC: <proof>` and exit 2, so an S2 to S5
+  testcase that found a GPU, device or module missing exited 0, recorded
+  CLEAN, and several of those runs discarded cards; process-driving
+  harnesses also swallowed their child's failure. The rule, including
+  passing a child's nonzero status through, now lives once in the
+  session-rules digest every backend reads, the compact prompt carries the
+  same rules, and
+  `go run` marks the program's start so a testcase that never compiled
+  declares `NO_EXEC` instead of counting toward the execution rate.
+
+- **A crash an empty input reproduces is not testcase evidence.** One tool
+  faulted during start-up whatever it read, and ten campaign probes recorded
+  `CRASH`. `bin/probe` now reruns a crash once on an empty file beside the
+  testcase, and an identical crash state is recorded as `NO_EXEC
+  class=input-independent`.
+
+- **Coverage that never reached the target does not retire a card.** Agents
+  often wrote the project's own name as `TARGET`, which matched every frame
+  under the checkout: all 38 such coverage results in the last campaign were
+  HITs. That `TARGET` is now treated as absent. A CLEAN run with MISSED
+  coverage no longer counts toward the three-CLEAN discard floor, and the
+  refusal names those runs so the agent revises its input; eight had retired
+  one card.
+
+- **Every run keeps its own output.** Repeated probes of one testcase shared
+  one output path, so 30% of run rows pointed at another run's diagnostic.
+  Each run now writes its own file and the conventional name is a copy of
+  the newest. A harness build is rebuilt when a quoted header beside it
+  changes, and a hand-written `bin/state add-run` row must name an existing
+  testcase and output.
+
+- **Probe refuses inputs it would run wrongly, and only those.** A C or C++
+  testcase that includes a target header without a `HARNESS` header is
+  refused instead of being fed to the target binary and logged CLEAN, but
+  only when it has a `main` or fuzz entry point outside comments and
+  literals; compiled source is refused on an interpreter runner. Harnesses
+  get `TOKENFUZZ_TARGET_BIN` for the rebuilt product. `bin/state
+  update-hyp` refuses a `CRASH-`/`FIND-` status that names no filed bundle,
+  `update-card` requires an agent, and S1 cards skip files no longer in the
+  tree.
+
+- **Exit codes are read more carefully.** An unrecognized flag at exit 1 is
+  a usage error rather than rejected input, and a demuxer's "error reading
+  header" is rejected input rather than a bare exit. Runner success codes
+  now reserve only 124 to 159, so a CLI that returns a negative error code
+  from `main` is accepted as a runner. An S8 marker naming a property kind
+  other than the declared one is ordinary output, and the declared kind is
+  recorded on the run row.
+
+### Go targets
+
+- **Go's fault and checkptr reports count as memory-safety evidence.** A Go
+  `fatal error: fault` with matching fault and signal addresses was labeled
+  `EXEC_FAIL`, and a checkptr report from the `-race` build would have been
+  rejected as a runtime panic. Probe, multi-run and triage now credit both
+  like a sanitizer diagnostic; a near-null fault stays a null dereference.
+
+- **Go crashes have a crash state.** Identical Go faults in two runs each
+  filed a bundle and got a full review. The first faulting goroutine's
+  traceback now supplies line-exact frames and the key, both taken from the
+  same run, and clustering gives faults and checkptr reports their own
+  primitive, so repeats fold while different lines stay apart.
+
+- **Files the Go runner cannot build rank last.** S7 and S8 spent ten
+  sessions on vendored `_windows.go` and `_zos_s390x.go` files. Go's own
+  filename rules, asked of the configured Go runner under its
+  `[runner].env`, now demote those cards for runner-bound strategies; with
+  no established Go runner nothing is demoted. `flow-typed/` stubs leave the
+  ranked source set.
+
+- **Go reproducers replay the probe's environment.** Exported Go source
+  reproducers dropped `[runner].env`, losing `GOFLAGS=-mod=readonly`,
+  `GORACE` and the probe's caches, and could edit the maintainer's module
+  files. They now replay those entries with paths mapped to the maintainer's
+  checkout, and Go probes run with `-mod=readonly`. For every language,
+  export reads the crash's own session and refuses a reproducer that leaks
+  a local path instead of rewriting evidence bytes.
+
+### Target setup and coverage
+
+- **A harness links every library the build publishes.** Setup selected one
+  library, so on a project that ships several, every other public API failed
+  at the linker and agents fell back to `dlopen` and mangled symbols. Setup
+  now adds the in-tree pkg-config peers of a static primary in dependency
+  order, and for a shared primary each sibling library that links and starts
+  an empty sanitizer program, retried beside the peers that load. Coverage,
+  fuzz, alternate and other-sanitizer builds link the same set from their
+  own trees, and cached binaries are keyed on peer metadata so a rebuilt
+  peer cannot leave stale code running.
+
+- **Setup stops on a missing host prerequisite and cleans up.** A missing
+  `pkg-config` for Meson was retried as a recipe error on every backend, and
+  failed build-script runs left 888 scratch builds, about 8 GB, under
+  `TMPDIR`. `bin/auto-build-script` now exits 5 for a missing prerequisite
+  on the repair path too, `bin/setup-target` stops its backend loop on it,
+  and every exit removes scratch. A pinned backend
+  is the only repair candidate; a Codex run no longer falls back to Claude
+  and Gemini with the Codex model name.
+
+- **Coverage siblings build for C++20 and newer compilers.** CMake looks for
+  `clang-scan-deps` beside the compiler shim, so every C++20 scan step
+  failed; a wrapper now maps shims to the real compilers and a recorded
+  failure retries. `-pedantic-errors` is demoted like `-Werror`, and a
+  primary that only forwards to peer libraries is verified by the libraries
+  a harness links.
+
+- **Coverage replay keeps the target's sanitizer options.** The replay
+  replaced `ASAN_OPTIONS` outright, dropping options a target sets to get
+  past a start-up defect, so on one target all 31 results measured the same
+  start-up edges. Sanitizer options are now layered over `[runner].env` and
+  the configured options, coverage keys last. A probe on an alternate build
+  config replays on the control build's coverage twin and says so.
+
+### Directed fuzzing
+
+- **S4 admission is input shape, not a product route.** `bin/fuzz
+  candidates` said an API was "reachable by" untrusted input, and S4 spent
+  whole slices on vendored wrappers no product code calls. The command,
+  template, card, guide and `AGENTS.md` now call it shape compatibility and
+  require tracing a product input route before a harness is built.
+
+- **One dry campaign no longer retires fuzzing.** The S4 card closed like a
+  concrete card, so a single dry pass over one small harness ended fuzzing
+  for the target and a pinned S4 run minutes into its wall. It now stays
+  claimable behind fresher work until blocked, and a lead a peer already
+  owns no longer launches empty refill sessions.
+
+- **C++ APIs are fuzzable.** Mangled exports were never matched to their
+  declarations and read as reserved names. Candidates now use demangled,
+  qualified names, so `A::parse` and `B::parse` are credited separately, a
+  destructor does not resolve to its constructor, and a harness is generated
+  as C++ when the target's flags require it.
+
+- **A harness allocates input the way its callers do.** A harness passed
+  libFuzzer's exact-size buffer to a parser whose callers all pad, and a
+  read into that padding was filed as a crash. The receipt carries an
+  unresolved `INPUT-BUFFER` line and the template copies the input with
+  `FZ_INPUT_PADDING` bytes, adding no hidden byte for empty input.
+
+- **Progress is judged on target coverage.** An OOM slice that reached new
+  edges was quarantined as noise, feature creep kept a mined-out harness
+  productive, three slices each just under the 2% threshold saturated a
+  harness that was still learning, and an unguided build's own edges read as
+  progress. One predicate now decides progress, growth is summed over the
+  dry streak, and a manifest that did not record its build mode stays
+  unknown instead of false. Campaign artifacts under `fuzz/artifacts` now
+  become leads, and a lead `bin/fuzz run` cannot replay names the manual
+  probe route.
+
+### Triage and gates
+
+- **Gates use the results tree's threat model.** Post-wall and hand-run gate
+  passes inherited no session and fell back to `attacker_controls=bytes`:
+  two findings with Promote votes were rejected on targets that pin race and
+  protocol-state controls. Every gate entry point now adopts the tree's own
+  digest-checked session, the tree's pin beats a stale environment value,
+  one tree holds the process environment at a time, and `validate-finding`
+  refuses a batch that spans trees.
+
+- **A vendored, private-state or FFI trigger needs a product route.** Gates
+  accepted findings resting on a vendored dependency with no product caller,
+  malformed bytes in a service's private database, and credentials the first
+  recipient already held. Both gate prompts now ask for that route, and a
+  bug that needs asserts compiled out is accepted when the report cites the
+  project's supported release build, which the report prompt now asks for.
+
+- **Two agents' artifacts stay separate.** Agents name their own findings,
+  so two could both file `FIND-003-<slug>`, and triage rejecting one
+  discarded the other's hypothesis. Status matching now uses the full name,
+  and a bare id or shared hypothesis id resolves only through bundle
+  provenance. Re-confirming after a harness comment edit revises the agent's
+  own bundle instead of filing a second.
+
+- **More duplicate crash write-ups fold.** A finding that saved its own copy
+  of a filed crash report became a second bundle; it now folds when its
+  sanitizer report is byte-identical. Darwin frames carry only a file name,
+  so a finding at its crash's line was reviewed twice; triage now reads the
+  symbolized copy, and saved runs fold 31 such pairs instead of 5.
+  Unsymbolized frames keep their module offset, so two different crashes in
+  one stripped library no longer share a crash state.
+
+- **A container no longer takes a testcase for a program.** On a Docker
+  Desktop bind mount `access()` reports every file executable to root, and
+  `file` names many input byte patterns executables, so a crafted input was
+  skipped as a built binary and its crash sat "missing testcase" until it
+  aged out to `crashes-rejected/`. Crash bundles and setup's build detection
+  now read a file's execute bits instead, and the input the probe's run
+  header names stays the testcase even when it is executable.
+
+- **Unjudged work reads as pending.** Cluster indexes derived OK from a
+  report's presence, so 20 unjudged findings looked published, and 21
+  findings the wall cut off before review had no receipt at all. Each now
+  carries a pending receipt naming why, indexes show `PENDING REVIEW`, and
+  indexes are rendered after the final iteration of a wall-cut run.
+
+- **An accepted finding stays accepted when the harness annotates it.** The
+  fast finalization pass wrote scorer fields into an accepted report before
+  validating it, so the quality verdict read stale: its two votes were paid
+  again, or at the wall the finding dropped out of the live count. The
+  verdict now crosses every such write, as trigger votes already did, and
+  only when the write started from the reviewed text, so an author edit
+  racing it still invalidates the verdict.
+
+- **Quiet crash bundles seal mid-session, and the wall never downgrades a
+  verdict.** Bundles from sessions that ran to the wall were never sealed,
+  and the post-wall pass re-added a Class line export had stripped, staling
+  a promoted crash to pending. A complete crash bundle untouched for five
+  minutes now seals while its writer runs, and an expired pass leaves
+  reports alone.
+
+- **Scope disagreements get resolved, and rejections are remembered.** Two
+  Promote reviews that disagreed on scope were rejected as unsettled; they
+  now go to the focused resolver, and the trigger review treats address
+  knowledge as an exploitability precondition when the bytes name the
+  dereferenced pointer. A confirmed defect rejected as outside the
+  declared controls leaves scope advice on the next session's card so it is
+  not filed again, and its report no longer says triage kept the crash.
+
+- **Severity scores authenticated boundaries and narrow disclosures.** Every
+  report scored `PR:N`, and a path-existence disclosure scored like
+  arbitrary data. A Boundary beginning with Authenticated now scores `PR:L`,
+  and `Disclosed content: limited-metadata` scores `MVC:L/MVA:N`. A review
+  stopped at its tool-call cap logs `FAIL turn-cap` rather than `FAIL
+  parse`, which hid 45 budget stops in the last campaign.
+
+### Scheduling and agent time
+
+- **Cluster expansion never holds the run.** A barrier ran expansion inline,
+  and one 604-second decision idled every slot of a pinned run. Expansion
+  now has its own lane, drained at the end of the run, and an agent's open
+  cluster leads are offered before a fresh card. A compact session finishes
+  a crash triage handed back before it stops.
+
+- **A re-found bug is not new progress mid-run.** A continuous run stamps
+  clusters only at its final barrier, so each steward tick counted every
+  accepted crash as its own root cause, and a lane re-finding one bug by
+  another route read as productive. Ticks now cluster the admitted
+  artifacts alone, read-only, so an unjudged report cannot merge two real
+  root causes either.
+
+- **A pinned lane leads with its own evidence.** In a pinned S3 run nearly
+  every card was a companion of a memory card; cards whose own reasons carry
+  the lane's evidence now rank first. File-format signature checks no longer
+  read as credential checks. Pinned S1, S4 and S6 queues write a source
+  manifest, and orphan enforcement skips generated files instead of
+  reporting false `EXEC_FAIL`s.
+
+- **S6 carries only leads an offline session can resolve.** Advisory cards
+  with no evidence link, fix excerpt or local clone were claimed only to be
+  blocked; they are skipped and counted. A pinned S6 lane whose peers yield
+  no card stops and names each peer's gap, and a project spanning many
+  domains gets peers for its most exposed parser.
+
+- **A slow symbolizer is not retried on every run.** Every run of a
+  five-run confirm retried a symbolizer that had timed out on the same
+  library, and each PyTorch probe paid a 60-second `atos` deadline again,
+  about 50 minutes over 38 probes. The runs of one confirm now share the
+  first timeout and keep raw frames, `atos` skips a module after two
+  timeouts in the same run, and export symbolizes a copy for the report
+  title.
+
+- **The agent guide states what exists, at normal volume.** It kept
+  statuses that do not exist and journal-era rules, and shouted nearly every
+  rule. It now names the active statuses the rotation gate counts, drops the
+  retired rules, and lowers its caps without changing meaning.
+
+### Backends and accounting
+
+- **Sessions do not load the operator's own tools or settings.** Codex
+  started the MCP servers in the operator's `config.toml` in every audit
+  session, outside the sandbox, and ran the notify hook after each turn;
+  launches now disable each server and the hook, and refuse to start if a
+  server cannot be addressed. Claude agents pass `--setting-sources ""`, so
+  an operator's local deny on `.git` no longer blocks S1, and a failed
+  decision logs the CLI's own reason.
+
+- **A provider refusal stops preflight.** A 401 was retried three times per
+  target, about 165 seconds each, and each attempt logged tokens no provider
+  served. Preflight now stops on the first classified refusal, a refused
+  launch is recovered as comparable only when it spent no wall, skipped
+  lanes record a stop event, and usage rows name the resolved default model
+  instead of an empty, unpriceable one.
+
+- **Spend adds up.** Rounding each row dropped small rows, a model missing
+  from the rate table left a partial total looking exact, and a deadline-cut
+  Claude session's output read about 10x low because thinking streams
+  redacted. Costs are summed exactly, `~` marks a total with unpriced usage,
+  redacted thinking is estimated, and five legacy Codex rates are added.
+
+### Benchmark, commands and documentation
+
+- **The benchmark page fits short runs.** Smoke-length runs padded axes to
+  half an hour and printed "0.0h". Times now read in minutes under an hour,
+  activity bins scale with the grant, a run killed partway reads
+  "interrupted" with a resume hint, and a condition that only hit provider
+  limits is pending rather than a measured zero. The sample-cpp answer key
+  credits its arbitrary write wherever the address lands.
+
+- **The handbook matches the code.** Every page was checked against
+  `bin/`, `lib/`, `.agents/` and `AGENTS.md` and rewritten to lead with the
+  reader's task, correcting the Python floor (3.11, or 3.10 with tomli),
+  `bin/audit`'s exit code and many flags, defaults and paths. Help text and
+  hints were corrected to match, and a test now requires every backticked
+  `bin/<cmd> --flag` hint to name a flag that command accepts.
+
+- **Drifted routes are fixed.** A Codex launch on Python 3.10 no longer
+  crashes reading its config; the TypeScript hooks load on the generic Node
+  route; a browser-mode shell with no page route runs with its runner
+  arguments; and `--target-path` names the output tree after the path as
+  given, so a local tree linked in as `targets/<slug>` keeps its slug.
+  Out-of-model crashes are described everywhere as rejected into
+  `crashes-rejected/`, as triage does.
+
 ## 1.6.2 - 2026-09-22
 
 Duplicate crash work was the largest waste in the last benchmark round: 141
