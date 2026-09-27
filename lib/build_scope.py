@@ -16,7 +16,8 @@ directories and conditional includes the driver really uses, and ``-MG`` keeps
 the listing going past a header the scan cannot find (a generated one, or one
 behind an include directory only the discovery build knew).
 
-The driver's language is the compile's own: see ``driver_language``.
+The suffix chooses the language except when a ``.c`` driver only parses as
+C++; see ``driver_language``.
 """
 
 from __future__ import annotations
@@ -34,13 +35,13 @@ import timeout
 # Suffixes of a file the compiler turns into object code: including one of
 # these compiles a translation unit. Headers, however large, are the
 # interface the pinned build also exposes.
-TARGET_UNIT_SUFFIXES = frozenset({".c", ".cc", ".cpp", ".cxx", ".m", ".mm"})
+TARGET_UNIT_SUFFIXES = frozenset({".c", ".cc", ".cpp", ".cxx", ".c++", ".m", ".mm"})
 # Suffixes clang compiles as C++ (`.C` is case-sensitive, so it is checked
 # apart from these lowercase ones).
 CXX_SUFFIXES = frozenset({".cc", ".cpp", ".cxx", ".c++", ".mm"})
 SCAN_SECONDS = 60
 # The scan's answer for one driver, beside it. Triage revisits a pending
-# crash every pass; the answer changes only when the driver's bytes do.
+# crash every pass; the answer changes when its bytes or compile context do.
 CACHE_NAME = ".build-scope.json"
 # One dependency token: runs of non-space characters, with `\ ` escaping a
 # space inside a path, as make-style dependency output writes it.
@@ -49,6 +50,7 @@ _TOKEN_RE = re.compile(r"(?:\\ |\S)+")
 
 def compiled_target_units(
     driver: Path, target_root: Path, *, include_dirs: tuple[Path, ...] = (),
+    defines: tuple[str, ...] = (),
 ) -> list[Path] | None:
     """Target-tree source units the driver compiles into itself.
 
@@ -70,19 +72,22 @@ def compiled_target_units(
     except OSError:
         return None
     cache = driver.parent / CACHE_NAME
+    include_flags = [f"-I{directory}" for directory in (root, *include_dirs)]
+    compile_flags = [*defines, *include_flags]
     try:
         cached = json.loads(cache.read_text(encoding="utf-8"))
-        if cached.get("sha256") == digest and cached.get("root") == str(root):
+        # The flags carry the target root as the first include directory.
+        if cached.get("sha256") == digest and cached.get("flags") == compile_flags:
             return [Path(unit) for unit in cached["units"]]
     except (OSError, ValueError, KeyError, TypeError):
         pass
-    include_flags = [f"-I{directory}" for directory in (root, *include_dirs)]
-    cxx = driver_language(driver, include_flags) == "c++"
+    language = driver_language(driver, compile_flags)
+    cxx = language == "c++"
     command = [
         sanitizer.llvm_tool("clang++" if cxx else "clang"),
         # clang reads the language off every other suffix itself.
         *(("-x", "c++") if cxx and driver.suffix == ".c" else ()),
-        "-MM", "-MG", *include_flags, str(driver),
+        "-MM", "-MG", *flags_for_language(compile_flags, language), str(driver),
     ]
     try:
         completed = timeout.run_timeout(
@@ -121,7 +126,8 @@ def compiled_target_units(
             units.append(relative)
     try:
         cache.write_text(
-            json.dumps({"sha256": digest, "root": str(root), "units": [str(u) for u in units]}),
+            json.dumps({"sha256": digest, "flags": compile_flags,
+                        "units": [str(u) for u in units]}),
             encoding="utf-8",
         )
     except OSError as exc:
@@ -146,6 +152,16 @@ def _place(token: Path, bases: tuple[Path, ...]) -> Path | None:
     return None
 
 
+def flags_for_language(flags: Sequence[str], language: str) -> list[str]:
+    # A configured C++ standard can accompany a plain C driver (and vice
+    # versa); passing it to the other compiler makes the scan fail before it
+    # can answer whether target source was compiled into the driver.
+    return [
+        flag for flag in flags
+        if not flag.startswith("-std=") or ("++" in flag) == (language == "c++")
+    ]
+
+
 def driver_language(driver: Path, flags: Sequence[str] = ()) -> str:
     """The language a C-family driver compiles as: ``"c"`` or ``"c++"``.
 
@@ -155,9 +171,11 @@ def driver_language(driver: Path, flags: Sequence[str] = ()) -> str:
     as ``harness.c`` built with ``clang++``. Such a file is C++ only when the
     compiler rejects it as C and accepts it as C++ under the same flags; a
     driver neither accepts (a header only the discovery build could find)
-    keeps its suffix, so this never guesses. Each parse drops the other
-    language's ``-std=``: a C++ target's configured ``-std=c++17`` would fail
-    every C parse, while a C++ parse keeps it.
+    keeps its suffix rather than guessing. A source that compiles in both
+    languages keeps its suffix too; the original model-direct compiler was
+    not recorded, so a dual-language legacy driver may need manual repair.
+    Each parse drops the other language's ``-std=``: a C++ target's configured
+    ``-std=c++17`` would fail every C parse, while a C++ parse keeps it.
     """
     driver = Path(driver)
     if driver.suffix == ".C" or driver.suffix.lower() in CXX_SUFFIXES:
@@ -169,10 +187,7 @@ def driver_language(driver: Path, flags: Sequence[str] = ()) -> str:
         command = [
             sanitizer.llvm_tool("clang++" if language == "c++" else "clang"),
             "-x", language, "-fsyntax-only",
-            *(
-                flag for flag in flags
-                if not flag.startswith("-std=") or ("++" in flag) == (language == "c++")
-            ),
+            *flags_for_language(flags, language),
             str(driver),
         ]
         try:

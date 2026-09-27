@@ -3026,8 +3026,10 @@ def _crash_review_is_reusable(crash_dir: Path) -> bool:
     return report is not None and _cached_trigger_resolution(crash_dir, report)
 
 
-def _configured_include_dirs(results_dir: Path, target_root: Path) -> tuple[Path, ...]:
-    """The include directories the pinned configuration compiles harnesses with.
+def _configured_compile_context(
+    results_dir: Path, target_root: Path,
+) -> tuple[tuple[Path, ...], tuple[str, ...]]:
+    """The include directories and defines used to compile harnesses.
 
     The session snapshot beside the results is the configuration the run
     executed; the live `output/<slug>/target.toml` serves a results tree
@@ -3036,14 +3038,17 @@ def _configured_include_dirs(results_dir: Path, target_root: Path) -> tuple[Path
     snapshot = Path(results_dir) / ".target.toml"
     path = snapshot if snapshot.is_file() else benchmark._find_output_target_toml(Path(results_dir))
     if path is None:
-        return ()
+        return (), ()
     config = target_config.Config(target_root=str(target_root))
     try:
         target_config.load_toml_into(config, path)
     except (OSError, ValueError) as exc:
         print(f"WARN: {path}: not readable for the build-scope scan: {exc}", file=sys.stderr)
-        return ()
-    return tuple(Path(config.resolve_path(entry)) for entry in config.includes if entry)
+        return (), ()
+    return (
+        tuple(Path(config.resolve_path(entry)) for entry in config.includes if entry),
+        tuple(config.defines),
+    )
 
 
 def triage_one_crash(
@@ -3129,9 +3134,10 @@ def triage_one_crash(
         # permanent and never rests on the scanner's own failure. A crash
         # already published under an earlier decision keeps its verdict; the
         # rule binds what is filed from now on, not settled campaigns.
+        include_dirs, defines = _configured_compile_context(results_dir, target_root)
         units = build_scope.compiled_target_units(
             harness, target_root,
-            include_dirs=_configured_include_dirs(results_dir, target_root),
+            include_dirs=include_dirs, defines=defines,
         )
         if units:
             demote_to_finding(

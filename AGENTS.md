@@ -210,7 +210,7 @@ disclosure, crypto, race, logic flaw — with or without a reproducer.
 
 Before filing: `bin/scratch-search <function>` for your crash site; it covers `crashes/` and `crashes-rejected/`.
 
-**Bundle layout (post-triage, automatic):** after a crash dir passes triage, the harness runs `bin/export-repro` to convert it into a maintainer-facing bundle. Root files become `report.md` (rewritten from yours), `reproduce.sh`, `input.<ext>`, `harness.c` (if applicable), and `sanitizer.txt` — one command (`./reproduce.sh /path/to/src`) reproduces against a clean upstream checkout. Audit-side originals (your `report.md` draft, `reproducer.sh`, H-prefixed scratch artifacts) move into `<crash>/.audit/` for provenance.
+**Bundle layout (post-triage, automatic):** after a crash dir passes triage, the harness runs `bin/export-repro` to convert it into a maintainer-facing bundle. Root files become `report.md` (rewritten from yours), `reproduce.sh`, `input.<ext>`, a driver such as `harness.c` or `harness.cpp` (if applicable), and `sanitizer.txt` — one command (`./reproduce.sh /path/to/src`) reproduces against a clean upstream checkout. Audit-side originals (your `report.md` draft, `reproducer.sh`, H-prefixed scratch artifacts) move into `<crash>/.audit/` for provenance.
 
 ---
 

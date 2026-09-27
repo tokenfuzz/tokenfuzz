@@ -1658,6 +1658,12 @@ assert_in('export DYLD_LIBRARY_PATH="$san_lib_dir', text_a,
           "c-harness asan_lib SET: env block exports DYLD_LIBRARY_PATH for macOS")
 assert_in('if [ -n "$san_lib_dir" ]; then', text_a,
           "c-harness asan_lib SET: env block guarded by san_lib_dir non-empty test")
+assert_in(' -DPROBE_VALUE=7 -I "$src"/include',
+          er.emit_driver_args(["include"], ["-DPROBE_VALUE=7"], "c"),
+          "export carries a harness compile define that probe used")
+assert_not_in("-std=c++17",
+              er.emit_driver_args([], ["-std=c++17"], "c"),
+              "a C driver does not inherit the target's C++ standard")
 assert_in("quarantine_size_mb=256:redzone=64", text_a,
           "c-harness ASan defaults: reproducer keeps run-asan redzone/quarantine")
 assert_in('"$build/repro" "$here/input.bin"', text_a,
@@ -2181,15 +2187,28 @@ cxx_crash.mkdir()
 )
 (cxx_crash / "input.bin").write_bytes(b"ABC")
 (cxx_crash / "harness.c").write_text(
+    "#ifndef REPRO_TOKEN\n#error missing configured driver define\n#endif\n"
     "namespace app { int parse(const char *); }\n"
     "int main(int argc, char **argv) { return argc > 1 ? app::parse(argv[1]) : 0; }\n",
     encoding="utf-8",
 )
 if shutil.which(_cb_sanitizer.llvm_tool("clang")) and shutil.which(_cb_sanitizer.llvm_tool("clang++")):
-    cxx_export = subprocess.run(
-        [str(ROOT / "bin" / "export-repro"), "CRASH-CXX-1"],
-        capture_output=True, text=True, env=env, cwd=output_root,
-    )
+    config_path = output_root / "target.toml"
+    original_config = config_path.read_text(encoding="utf-8")
+    try:
+        config_path.write_text(
+            original_config.replace(
+                "\n[threat_model]\n",
+                '\ndefines = ["-DREPRO_TOKEN=7"]\n\n[threat_model]\n',
+            ),
+            encoding="utf-8",
+        )
+        cxx_export = subprocess.run(
+            [str(ROOT / "bin" / "export-repro"), "CRASH-CXX-1"],
+            capture_output=True, text=True, env=env, cwd=output_root,
+        )
+    finally:
+        config_path.write_text(original_config, encoding="utf-8")
     assert_eq(0, cxx_export.returncode,
               f"export-repro bundles a C++ driver saved as .c: {cxx_export.stderr}")
     cxx_script = (cxx_crash / "reproduce.sh").read_text(encoding="utf-8")
@@ -2197,6 +2216,8 @@ if shutil.which(_cb_sanitizer.llvm_tool("clang")) and shutil.which(_cb_sanitizer
               "a C++ driver saved as .c is staged as harness.cpp")
     assert_in('clang++ -fsanitize=address', cxx_script,
               "reproduce.sh compiles the C++ driver with clang++")
+    assert_in(' -DREPRO_TOKEN=7 ', cxx_script,
+              "reproduce.sh carries the define that let the C++ driver compile")
     assert_in('"$here/harness.cpp"', cxx_script, "reproduce.sh compiles harness.cpp")
     assert_eq(False, (cxx_crash / "harness.c").exists(),
               "the stale harness.c leaves the bundle root, so discovery cannot pick it")

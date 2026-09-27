@@ -216,11 +216,16 @@ class UnresolvableFrameTests(unittest.TestCase):
         if self.cached.is_file():
             self.skipTest("this host keeps the system library on disk")
         self.assertFalse(sanitizer.has_resolvable_raw_frame(self.frame(str(self.cached))))
+        self.assertFalse(sanitizer.has_resolvable_raw_frame(
+            self.frame("/System/Library/Frameworks/Sample.framework/Sample"),
+        ))
         self.assertTrue(sanitizer.has_resolvable_raw_frame(self.frame(str(self.module))))
         # A deleted build or a moved driver binary is what the warning is for.
         self.assertTrue(sanitizer.has_resolvable_raw_frame(
             self.frame(str(self.root / "build-asan" / "libgone.dylib")),
         ))
+        # Linux has a /usr/lib too: a missing library there is a real gap.
+        self.assertTrue(sanitizer.has_resolvable_raw_frame(self.frame("/usr/lib/libgone.so")))
         # A bare module name says nothing about where it lives.
         self.assertTrue(sanitizer.has_resolvable_raw_frame(self.frame("libsample.so")))
         self.assertFalse(sanitizer.has_resolvable_raw_frame(

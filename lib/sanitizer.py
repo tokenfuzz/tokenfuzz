@@ -52,11 +52,6 @@ RAW_FRAME = re.compile(
 _RAW_FRAME_MODULE = re.compile(r"\(([^()]+?)(?::[A-Za-z0-9_]+)?\+0x[0-9a-f]+\)\s*$")
 
 
-# macOS's sealed system locations. A library named there that is not on disk
-# lives only in the dyld shared cache.
-_SHARED_CACHE_PREFIXES = ("/usr/lib/", "/System/Library/")
-
-
 def has_resolvable_raw_frame(text: str) -> bool:
     """Whether a report keeps a raw frame that should carry a source line.
 
@@ -71,7 +66,12 @@ def has_resolvable_raw_frame(text: str) -> bool:
             continue
         match = _RAW_FRAME_MODULE.search(line)
         module = match.group(1) if match else ""
-        if not (module.startswith(_SHARED_CACHE_PREFIXES) and not os.path.isfile(module)):
+        # macOS's sealed system locations. Linux has a /usr/lib too, where a
+        # missing library is a real gap, so only a .dylib there is cached.
+        shared_cache = module.startswith("/System/Library/") or (
+            module.startswith("/usr/lib/") and module.endswith(".dylib")
+        )
+        if not (shared_cache and not os.path.isfile(module)):
             return True
     return False
 

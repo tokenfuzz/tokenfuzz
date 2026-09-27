@@ -1380,6 +1380,12 @@ def emit_include_args(includes: list[str]) -> str:
     return args
 
 
+def emit_driver_args(includes: list[str], defines: list[str], language: str) -> str:
+    """Flags the exported driver needs from the same config as its probe build."""
+    flags = build_scope.flags_for_language(defines, language)
+    return "".join(f" {shq(flag)}" for flag in flags) + emit_include_args(includes)
+
+
 # Audit-side reproducer body rewriter (the second awk in bin/export-repro).
 _REWRITE_INTERNAL_HEADER_RE = re.compile(
     r"^\s*#\s*(?:TARGET|HYPOTHESIS-ID|CATEGORY|CARD-ID|HARNESS):"
@@ -3654,7 +3660,9 @@ def main(argv: list[str]) -> int:
         ):
             local_src = f"targets/{slug}"
 
-        includes_args = emit_include_args(cfg.includes)
+        includes_args = emit_driver_args(
+            cfg.includes, cfg.defines, "c++" if harness_compiler == "clang++" else "c",
+        )
         link_lib_resolves, link_libs = emit_link_libs_with_resolves(cfg.link_libs, sanitizer)
 
         # If the audit converged on a build recipe via bin/auto-build-script,

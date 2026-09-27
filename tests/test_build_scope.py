@@ -93,6 +93,18 @@ class CompiledTargetUnitsTests(unittest.TestCase):
         )
 
     @unittest.skipUnless(_clang_available(), "no clang for the dependency scan")
+    def test_cxx_source_suffix_is_a_compiled_target_unit(self) -> None:
+        (self.target / "sample.c++").write_text("int app_parse() { return 1; }\n")
+        driver = self.driver(
+            '#include "sample.c++"\nint main() { return app_parse(); }\n',
+            name="harness.cpp",
+        )
+        self.assertEqual(
+            build_scope.compiled_target_units(driver, self.target),
+            [Path("sample.c++")],
+        )
+
+    @unittest.skipUnless(_clang_available(), "no clang for the dependency scan")
     def test_source_outside_the_target_tree_is_not_a_target_unit(self) -> None:
         (self.crash / "helper.c").write_text("int helper(void) { return 0; }\n")
         driver = self.driver('#include "helper.c"\nint main(void) { return helper(); }\n')
@@ -104,7 +116,6 @@ class CompiledTargetUnitsTests(unittest.TestCase):
         # unit bare; without that directory the scan sees only a token.
         driver = self.driver('#include "extra.c"\nint main(void) { return extra(); }\n')
         self.assertEqual(build_scope.compiled_target_units(driver, self.target), [])
-        (driver.parent / build_scope.CACHE_NAME).unlink()
         self.assertEqual(
             build_scope.compiled_target_units(
                 driver, self.target, include_dirs=(self.target / "src",),
@@ -124,10 +135,33 @@ class CompiledTargetUnitsTests(unittest.TestCase):
         # Without the build directory the macro never defines and the unit is
         # never opened: a documented limit of the scan, not a verdict.
         self.assertEqual(build_scope.compiled_target_units(driver, self.target), [])
-        (driver.parent / build_scope.CACHE_NAME).unlink()
         self.assertEqual(
             build_scope.compiled_target_units(driver, self.target, include_dirs=(build,)),
             [Path("src/extra.c")],
+        )
+
+    @unittest.skipUnless(_clang_available(), "no clang for the dependency scan")
+    def test_configured_define_selects_the_compiled_target_unit(self) -> None:
+        driver = self.driver(
+            "#ifdef USE_EXTRA\n#include \"src/extra.c\"\n#endif\n"
+            "int main(void) { return 0; }\n",
+        )
+        self.assertEqual(build_scope.compiled_target_units(driver, self.target), [])
+        self.assertEqual(
+            build_scope.compiled_target_units(
+                driver, self.target, defines=("-DUSE_EXTRA",),
+            ),
+            [Path("src/extra.c")],
+        )
+
+    @unittest.skipUnless(_clang_available(), "no clang for the dependency scan")
+    def test_other_language_standard_does_not_break_the_scan(self) -> None:
+        driver = self.driver('#include "sample.c"\nint main(void) { return app_parse("x"); }\n')
+        self.assertEqual(
+            build_scope.compiled_target_units(
+                driver, self.target, defines=("-std=c++17",),
+            ),
+            [Path("sample.c")],
         )
 
     @unittest.skipUnless(_clang_available(), "no clang for the dependency scan")
@@ -204,17 +238,18 @@ class CompiledTargetUnitsTests(unittest.TestCase):
         self.assertIn("error: broken generated header", stderr.getvalue())
         self.assertNotIn("In file included from", stderr.getvalue())
 
-    def test_configured_include_dirs_come_from_the_session_snapshot(self) -> None:
+    def test_configured_compile_context_comes_from_the_session_snapshot(self) -> None:
         results = self.crash.parent.parent
         (results / ".target.toml").write_text(
-            'includes = [".", "build-asan/include"]\n', encoding="utf-8",
+            'includes = [".", "build-asan/include"]\n'
+            'defines = ["-DUSE_EXTRA"]\n', encoding="utf-8",
         )
         self.assertEqual(
-            triage._configured_include_dirs(results, self.target),
-            (self.target, self.target / "build-asan" / "include"),
+            triage._configured_compile_context(results, self.target),
+            ((self.target, self.target / "build-asan" / "include"), ("-DUSE_EXTRA",)),
         )
         (results / ".target.toml").unlink()
-        self.assertEqual(triage._configured_include_dirs(results, self.target), ())
+        self.assertEqual(triage._configured_compile_context(results, self.target), ((), ()))
 
     def test_missing_target_root_is_a_failed_scan_not_a_verdict(self) -> None:
         driver = self.driver("int main(void) { return 0; }\n")
