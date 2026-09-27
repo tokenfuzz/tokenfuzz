@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Iterator
 
+from command_tools import marked_executable
+
 
 NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 MAX_FLAG_LENGTH = 1024
@@ -201,7 +203,7 @@ def produced_artifacts(tree: str | os.PathLike[str]) -> bool:
             if path.name.endswith((".a", ".so", ".dylib")):
                 return True
             if (
-                os.access(path, os.X_OK)
+                marked_executable(path)
                 and not path.name.endswith((".cmake", ".sh", ".py", ".txt"))
                 and path.stat().st_size > 4096
             ):

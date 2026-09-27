@@ -43,6 +43,7 @@ from datetime import datetime, timezone
 import languages
 import build_config
 import timeout as timeout_utils
+from command_tools import marked_executable
 from pathlib import Path
 from typing import Iterable, Iterator, Optional
 
@@ -1813,7 +1814,7 @@ def _cli_candidates(san_dir: Path, root: Path, build_system: str,
         if installed is not None:
             for path in installed:
                 if (
-                    path.is_file() and os.access(path, os.X_OK)
+                    marked_executable(path)
                     and _binary_uses_sanitizer(path, sanitizer) and take(path)
                 ):
                     return found
@@ -1823,7 +1824,7 @@ def _cli_candidates(san_dir: Path, root: Path, build_system: str,
     declared, complete = declared_cli_extraction(root, build_system)
     for cand_name in declared:
         for m in _find_under(san_dir, name=cand_name):
-            if (os.access(m, os.X_OK) and not _is_aux_build_path(m, san_dir)
+            if (marked_executable(m) and not _is_aux_build_path(m, san_dir)
                     and _binary_uses_sanitizer(m, sanitizer) and take(m)):
                 return found
     if found and complete:
@@ -1833,7 +1834,7 @@ def _cli_candidates(san_dir: Path, root: Path, build_system: str,
     # exhaust the budget on pruned entries and never reach the real tool
     # (e.g. curl's build puts src/curl after a large CMakeFiles/ tree).
     def _is_cli_candidate(f: Path) -> bool:
-        if _is_aux_build_path(f, san_dir) or not os.access(f, os.X_OK):
+        if _is_aux_build_path(f, san_dir) or not marked_executable(f):
             return False
         return not (f.name.endswith((".exe", ".so", ".dylib", ".o"))
                     or "sanity" in f.name)
@@ -1999,10 +2000,7 @@ def detect_browser_sanitizer_bin(
         entries = sorted(san_dir.iterdir())
     except OSError:
         entries = []
-    direct = [
-        candidate for candidate in entries
-        if candidate.is_file() and os.access(candidate, os.X_OK)
-    ]
+    direct = [candidate for candidate in entries if marked_executable(candidate)]
     if len(direct) == 1 and sanitizer_binary_is_usable(
         root, sanitizer, direct[0]
     ):

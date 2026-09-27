@@ -2047,13 +2047,67 @@ def run_agent_guarded(
         )
 
 
-def _artifact_root_id(directory: Path) -> str:
-    cluster = cluster_common.artifact_cluster_id(directory)
-    if cluster:
-        return cluster
-    # Before the first clustering pass, keep unlabelled artifacts distinct.
-    # post_iteration stamps the deterministic root id before the next snapshot.
-    return directory.name
+def _artifact_root_ids(runtime: Runtime, lane: str, names: list[str]) -> dict[str, str]:
+    """Each counted artifact's root cause: its stamped cluster, else the cluster
+    the next index pass would stamp, else its own name.
+
+    The continuous scheduler stamps clusters only at its final barrier, so
+    mid-run every new artifact counted as a new root, and a lane re-finding
+    one bug by another path read as productive. The cluster tools' --json
+    mode computes the same membership without writing to any report.
+    """
+    stamped = {
+        name: cluster_common.artifact_cluster_id(runtime.results / lane / name)
+        for name in names
+    }
+    computed = (
+        _computed_cluster_ids(runtime, lane, names)
+        if not all(stamped.values()) else {}
+    )
+    # A new member can move its cluster's id, so every member of a cluster
+    # that holds an unstamped artifact takes the id the index pass will stamp;
+    # keeping an older member's stamp would split one cluster into two roots.
+    restamped = {
+        computed[name] for name, cluster in stamped.items()
+        if not cluster and name in computed
+    }
+    return {
+        name: computed[name] if computed.get(name) in restamped
+        else stamped[name] or name
+        for name in names
+    }
+
+
+def _computed_cluster_ids(
+    runtime: Runtime, lane: str, names: list[str],
+) -> dict[str, str]:
+    # Only the admitted artifacts: an unjudged report sharing two admitted
+    # ones' site or stack would join their clusters and hide real progress.
+    tool = "cluster-crashes" if lane == "crashes" else "cluster-findings"
+    command = [
+        sys.executable, str(Path(__file__).resolve().parent.parent / "bin" / tool),
+        str(runtime.results), "--json",
+        *(argument for name in names for argument in ("--only", name)),
+    ]
+    target_root = getattr(runtime, "target_root", None)
+    if lane == "findings" and target_root:
+        command += ["--target-root", str(target_root)]
+    try:
+        completed = run_timeout(command, 120, capture_output=True, text=True)
+        clusters = json.loads(completed.stdout)["clusters"] if completed.returncode == 0 else None
+    except (OSError, ValueError, KeyError, TypeError):
+        clusters = None
+    if not isinstance(clusters, list):
+        print(
+            f"WARN: {tool} --json failed; unclustered {lane} count as distinct roots",
+            file=sys.stderr,
+        )
+        return {}
+    return {
+        str(member): str(cluster["id"])
+        for cluster in clusters if isinstance(cluster, dict) and cluster.get("id")
+        for member in cluster.get("members") or ()
+    }
 
 
 @dataclass(frozen=True)
@@ -2073,12 +2127,10 @@ def progress(runtime: Runtime) -> ProgressSnapshot:
     artifact_roots: dict[str, str] = {}
     finding_root_ids: set[str] = set()
     crash_root_ids: set[str] = set()
-    for name in finding_names:
-        root = _artifact_root_id(runtime.results / "findings" / name)
+    for name, root in _artifact_root_ids(runtime, "findings", finding_names).items():
         artifact_roots[name] = f"finding:{root}"
         finding_root_ids.add(root)
-    for name in crash_names:
-        root = _artifact_root_id(runtime.results / "crashes" / name)
+    for name, root in _artifact_root_ids(runtime, "crashes", crash_names).items():
         artifact_roots[name] = f"crash:{root}"
         crash_root_ids.add(root)
     active = env_blocked = 0

@@ -780,12 +780,14 @@ def _clusters_from_sigs(sigs: list[dict]) -> list[dict]:
     return clusters
 
 
-def cluster_crashes(crashes_root: Path) -> list[dict]:
+def cluster_crashes(crashes_root: Path, only: "set[str] | None" = None) -> list[dict]:
     sigs: list[dict] = []
     if not crashes_root.is_dir():
         return sigs
     for d in sorted(crashes_root.iterdir()):
         if not d.is_dir() or not d.name.startswith("CRASH-"):
+            continue
+        if only is not None and d.name not in only:
             continue
         sig = _signature(d)
         sigs.append(sig)
@@ -1099,7 +1101,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--json", action="store_true", help="Emit cluster JSON to stdout")
     ap.add_argument("--json-out", type=Path, default=None,
                     help="Write cluster JSON to PATH and still update reports")
+    ap.add_argument("--only", action="append", metavar="NAME",
+                    help="with --json: cluster only these artifacts (repeatable), so an unjudged "
+                         "one cannot join two admitted clusters")
     args = ap.parse_args(argv)
+    if args.only and not args.json:
+        ap.error("--only requires --json: a partial clustering must not be written")
 
     # Three layouts we accept:
     #   * <results>/                 -> <results>/crashes/crash-clusters.md
@@ -1116,12 +1123,14 @@ def main(argv: list[str] | None = None) -> int:
         # root is identified only by its target.toml (the canonical rule in
         # lib/target_config.py), so a nested container like output/samples/ —
         # which has no target.toml — is not mistaken for one.
+        if args.only:
+            ap.error("--only takes a results or crashes directory")
         return _aggregate_target_root(args.results_dir, dry_run=args.dry_run, want_json=args.json)
     else:
         crashes_root = args.results_dir
         out_md = args.results_dir / "crash-clusters.md"
 
-    clusters = cluster_crashes(crashes_root)
+    clusters = cluster_crashes(crashes_root, only=set(args.only) if args.only else None)
 
     if args.json or args.json_out is not None:
         # Strip internal _full member objects before emitting.

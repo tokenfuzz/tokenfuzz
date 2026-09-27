@@ -361,6 +361,11 @@ def content_sha1_candidates(path: Path) -> frozenset[str]:
         report_text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return frozenset()
+    return text_sha1_candidates(report_text)
+
+
+def text_sha1_candidates(report_text: str) -> frozenset[str]:
+    """`content_sha1_candidates` for report text already in hand."""
     return frozenset({
         semantic_text_sha1(report_text),
         legacy_semantic_text_sha1(report_text),

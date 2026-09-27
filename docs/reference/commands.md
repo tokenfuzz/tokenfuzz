@@ -410,6 +410,7 @@ bin/cluster-findings "output/$TARGET"     # rebuild the cross-backend rollup
 | `--dry-run` | Write nothing; print the plan. |
 | `--json` | Print the clusters as JSON. |
 | `--json-out <file>` | Save the clusters as JSON and still update the reports. |
+| `--only <name>` | With `--json`, cluster only the named artifacts; repeat it per name. A running audit uses it to count root causes from admitted artifacts alone. |
 | `--target-root <dir>` | `bin/cluster-findings` only: strip this prefix from absolute paths in report text. |
 
 [Deduplication](../concepts/deduplication.md) explains the signatures.

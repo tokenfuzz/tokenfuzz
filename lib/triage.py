@@ -1185,9 +1185,10 @@ def _reach_field_cache(path: Path) -> dict:
 
 def _materialize_reach_fields(
     report: Path, accepted: dict[str, str],
-) -> bool:
+) -> tuple[str, str] | None:
+    """Write missing accepted fields; return (text read, text written)."""
     if not accepted:
-        return False
+        return None
     current = report.read_text(encoding="utf-8", errors="replace")
     additions = [
         f"{_ALL_REACH_FIELD_LABELS[key]}: {value}"
@@ -1195,7 +1196,7 @@ def _materialize_reach_fields(
         if not _reach_field_present(current, _ALL_REACH_FIELD_LABELS[key])
     ]
     if not additions:
-        return False
+        return None
     lines = current.rstrip().splitlines()
     insertion = next(
         (
@@ -1208,8 +1209,9 @@ def _materialize_reach_fields(
     if insertion and lines[insertion - 1].strip():
         block.insert(0, "")
     lines[insertion:insertion] = block
-    _atomic_write_text(report, "\n".join(lines).rstrip() + "\n")
-    return True
+    annotated = "\n".join(lines).rstrip() + "\n"
+    _atomic_write_text(report, annotated)
+    return current, annotated
 
 
 def _materialize_reach_fields_preserving_positive_votes(
@@ -1221,17 +1223,40 @@ def _materialize_reach_fields_preserving_positive_votes(
         report.parent / _TRIGGER_SECOND_NAME,
         report.parent / _TRIGGER_RESOLUTION_NAME,
     )
+    # Every carried verdict reviewed `reviewed`, and binds to exactly what the
+    # annotation wrote from it: an authored edit on either side of the write
+    # (the continuous gate can annotate while the agent still runs) leaves it
+    # stale rather than inherited.
+    reviewed = report.read_text(encoding="utf-8", errors="replace")
     prior_votes = {
         path: _cached_trigger_vote(report, path)
         for path in vote_files
     }
-    if not _materialize_reach_fields(report, accepted):
+    # An accepted quality verdict crosses the annotation too. Carried only by
+    # a later caller, it went stale whenever a pass wrote the fields and
+    # stopped before that caller: the finding left the live counts and its
+    # quorum was paid again after the wall.
+    quality_path = report.parent / ".llm-find-quality.json"
+    quality = _finding_cache(quality_path)
+    carry_quality = (
+        quality.get("accept") is True
+        and quality.get("decision_version") == report_identity.find_quality_decision_version()
+        and quality.get("report_sha1") in report_identity.text_sha1_candidates(reviewed)
+    )
+    written = _materialize_reach_fields(report, accepted)
+    if written is None:
         return False
+    if written[0] != reviewed:
+        return True
     # A positive trigger review cannot hide a bug. Reach fields are generated
     # by the harness from the same report evidence, so preserve only fail-open
     # votes captured immediately before this exact annotation. A Reject is
     # deliberately never carried across semantic content.
-    current_sha1 = report_identity.content_sha1(report)
+    current_sha1 = report_identity.semantic_text_sha1(written[1])
+    if carry_quality:
+        quality["content_sha1"] = _quality_content_sha1(written[1])
+        quality["report_sha1"] = current_sha1
+        _write_atomic_json(quality_path, quality)
 
     def _carry(path: Path, extra: dict | None = None) -> None:
         try:

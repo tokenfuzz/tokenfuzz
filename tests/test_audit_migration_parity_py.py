@@ -158,9 +158,11 @@ with tempfile.TemporaryDirectory(prefix="audit-migration-parity-") as temporary:
         detail="neutral migration fixture",
     )
     secondary_duplicate = audit_runner.progress(runtime)
+    introduced = audit_runner.newly_introduced_roots(novel, secondary_duplicate)
     check(
-        audit_runner.newly_introduced_roots(novel, secondary_duplicate)
-        == {"finding:FIND-004"},
+        len(introduced) == 1
+        and secondary_duplicate.artifact_roots["FIND-004"] in introduced
+        and "finding:FCL-B" not in introduced,
         "progress does not resurrect a stale cluster stamp from a secondary report file",
     )
     trigger_pending = findings / "FIND-005"
@@ -213,6 +215,91 @@ with tempfile.TemporaryDirectory(prefix="audit-migration-parity-") as temporary:
         audit_runner.filed_artifact_count(runtime) == filed_before + 1
         and audit_runner.progress(runtime).findings == uncredited_progress.findings,
         "filed_artifact_count sees an ungated candidate that admitted-only progress does not",
+    )
+
+    # The continuous scheduler stamps clusters only at its final barrier, so
+    # accepted crashes are still unlabelled mid-run. Two routes to one crash
+    # state are one root cause, as the index pass will stamp them, not two.
+    cluster_results = root / "cluster-results"
+    for name, leaf in (
+        ("CRASH-001-1", "app_parse"), ("CRASH-002-1", "app_parse"),
+        ("CRASH-003-1", "child_free"),
+    ):
+        crash = cluster_results / "crashes" / name
+        crash.mkdir(parents=True)
+        (crash / "report.md").write_text("# Neutral crash fixture\n", encoding="utf-8")
+        (crash / "sanitizer.txt").write_text(
+            "==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x602000000010\n"
+            "WRITE of size 4 at 0x602000000010 thread T0\n"
+            f"    #0 0x1 in {leaf} sample.c:91:5\n"
+            "    #1 0x2 in app_run sample.c:120:3\n"
+            "    #2 0x3 in main sample.c:140:10\n"
+            "SUMMARY: AddressSanitizer: heap-buffer-overflow sample.c:91:5 in "
+            f"{leaf}\n",
+            encoding="utf-8",
+        )
+        validation_receipt.write(
+            crash, kind="crash", state="reportable", detail="neutral migration fixture",
+        )
+    clustered = audit_runner.progress(SimpleNamespace(results=cluster_results, num_agents=1))
+    check(
+        (clustered.crashes, clustered.crash_roots) == (3, 2),
+        "unstamped crashes sharing a crash state count as one root cause",
+    )
+    # A resumed tree mixes a member stamped by an earlier final pass with one
+    # filed since; the new member may move the cluster's id, so the older
+    # member's stamp must not split the cluster into two roots.
+    stamped_report = cluster_results / "crashes" / "CRASH-001-1" / "report.md"
+    stamped_report.write_text(
+        "# Neutral crash fixture\n\nCluster: CL-00000000\n", encoding="utf-8",
+    )
+    validation_receipt.write(
+        stamped_report.parent, kind="crash", state="reportable",
+        detail="neutral migration fixture",
+    )
+    mixed = audit_runner.progress(SimpleNamespace(results=cluster_results, num_agents=1))
+    check(
+        mixed.crash_roots == 2
+        and mixed.artifact_roots["CRASH-001-1"] == mixed.artifact_roots["CRASH-002-1"],
+        "a stamped member and an unstamped one of the same cluster are one root",
+    )
+
+    # An unjudged crash sharing two frames with each of two admitted crashes
+    # joins their clusters when it is clustered too; live membership uses the
+    # admitted artifacts alone, so the second root still counts as progress.
+    bridge_results = root / "bridge-results"
+
+    def bridge_crash(name: str, frames: tuple[str, str, str], admitted: bool) -> None:
+        crash = bridge_results / "crashes" / name
+        crash.mkdir(parents=True)
+        (crash / "report.md").write_text("# Neutral crash fixture\n", encoding="utf-8")
+        stack = "".join(
+            f"    #{index} 0x{index + 1} in {frame} sample.c:{10 * (index + 1)}:1\n"
+            for index, frame in enumerate(frames)
+        )
+        (crash / "sanitizer.txt").write_text(
+            "==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x602000000010\n"
+            "WRITE of size 4 at 0x602000000010 thread T0\n"
+            f"{stack}SUMMARY: AddressSanitizer: heap-buffer-overflow sample.c:10:1 in {frames[0]}\n",
+            encoding="utf-8",
+        )
+        if admitted:
+            validation_receipt.write(
+                crash, kind="crash", state="reportable", detail="neutral migration fixture",
+            )
+
+    bridge_runtime = SimpleNamespace(results=bridge_results, num_agents=1)
+    # The unjudged crash sorts first, so a full clustering makes it the
+    # representative both admitted crashes join.
+    bridge_crash("CRASH-001-1", ("app_read", "app_parse", "child_free"), False)
+    bridge_crash("CRASH-002-1", ("app_read", "app_parse", "app_copy"), True)
+    first = audit_runner.progress(bridge_runtime)
+    bridge_crash("CRASH-003-1", ("app_read", "child_free", "child_drop"), True)
+    second = audit_runner.progress(bridge_runtime)
+    check(
+        (second.crashes, second.crash_roots) == (2, 2)
+        and len(audit_runner.newly_introduced_roots(first, second)) == 1,
+        "an unjudged crash cannot join two admitted clusters into one root",
     )
 
     label = audit_runner.iteration_outcome_label

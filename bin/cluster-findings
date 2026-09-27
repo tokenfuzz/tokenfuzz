@@ -373,12 +373,16 @@ def _make_clusters(sigs: list[dict], display_key: str = "id") -> list[dict]:
     return clusters
 
 
-def cluster_findings(findings_root: Path, target_root: str = "") -> list[dict]:
+def cluster_findings(
+    findings_root: Path, target_root: str = "", only: "set[str] | None" = None,
+) -> list[dict]:
     sigs: list[dict] = []
     if not findings_root.is_dir():
         return sigs
     for d in sorted(findings_root.iterdir()):
         if not d.is_dir() or not d.name.startswith("FIND-"):
+            continue
+        if only is not None and d.name not in only:
             continue
         sigs.append(_signature(d, target_root))
     return _make_clusters(sigs, display_key="id")
@@ -736,7 +740,12 @@ def main(argv: list[str] | None = None) -> int:
                     help="Emit cluster JSON to stdout")
     ap.add_argument("--json-out", type=Path, default=None,
                     help="Write cluster JSON to PATH and still update reports")
+    ap.add_argument("--only", action="append", metavar="NAME",
+                    help="with --json: cluster only these artifacts (repeatable), so an unjudged "
+                         "one cannot join two admitted clusters")
     args = ap.parse_args(argv)
+    if args.only and not args.json:
+        ap.error("--only requires --json: a partial clustering must not be written")
 
     rd = args.results_dir.resolve()
     # Reports cite the bug site as `targets/<slug>/...`; the cluster key
@@ -761,6 +770,8 @@ def main(argv: list[str] | None = None) -> int:
         # A target root is identified only by its target.toml (the canonical
         # rule in lib/target_config.py), so a nested container like
         # output/samples/ — which has no target.toml — is not mistaken for one.
+        if args.only:
+            ap.error("--only takes a results or findings directory")
         return _aggregate_target_root(rd, target_root, dry_run=args.dry_run,
                                       want_json=args.json)
     else:
@@ -768,7 +779,10 @@ def main(argv: list[str] | None = None) -> int:
         out_md = rd / "finding-clusters.md"
         link_prefix = ""
 
-    clusters = cluster_findings(findings_root, target_root=target_root)
+    clusters = cluster_findings(
+        findings_root, target_root=target_root,
+        only=set(args.only) if args.only else None,
+    )
 
     if args.json or args.json_out is not None:
         emitted = [{k: v for k, v in c.items() if k != "_full"} for c in clusters]

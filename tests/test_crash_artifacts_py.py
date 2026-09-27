@@ -13,9 +13,11 @@ eagerly inside the try.
 
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "lib"))
@@ -393,6 +395,43 @@ with tempfile.TemporaryDirectory() as td:
 
     assert_eq(False, ca.is_executable_binary(misleading),
               "is_executable_binary: pathname cannot supply the file type")
+
+
+# A Docker Desktop bind mount answers access(X_OK) for every file when the
+# audit runs as root, and libmagic calls many input byte patterns executable.
+# The execute bit says a file was built rather than supplied, so a crafted
+# input (here the header an ELF-parsing target reads) stays the testcase.
+with tempfile.TemporaryDirectory() as td:
+    crafted = Path(td) / "tc_header.bin"
+    crafted.write_bytes(b"\x7fELF\x02\x01\x01" + bytes(57))
+    crafted.chmod(0o644)
+    real_access = os.access
+
+    def mount_access(path, mode, *args, **kwargs):
+        return True if mode == os.X_OK else real_access(path, mode, *args, **kwargs)
+
+    with mock.patch.object(os, "access", mount_access):
+        assert_eq(False, ca.is_executable_binary(crafted),
+                  "is_executable_binary: a mount's access(X_OK) does not make an input a program")
+        assert_eq(crafted, ca.find_testcase([Path(td)]),
+                  "find_testcase: a non-executable input libmagic calls a binary stays the testcase")
+
+# The probe's run header records the exact input it fed. A crafted ELF for a
+# binary-format parser can carry an execute bit and is still the testcase.
+with tempfile.TemporaryDirectory() as td:
+    crafted = Path(td) / "tc_header.elf"
+    crafted.write_bytes(b"\x7fELF\x02\x01\x01" + bytes(57))
+    crafted.chmod(0o755)
+    sanitizer = Path(td) / "sanitizer.txt"
+    sanitizer.write_text(
+        f"[probe] mode=generic testcase={crafted} asan_output={td}/out.asan.txt\n"
+        "==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x1\n",
+        encoding="utf-8",
+    )
+    assert_eq(crafted.resolve(), ca.find_testcase([Path(td)], sanitizer_files=(sanitizer,)),
+              "find_testcase: an executable input the run header names is still the testcase")
+    assert_eq(None, ca.find_testcase([Path(td)]),
+              "find_testcase: without that record an executable ELF is not taken for an input")
 
 
 with tempfile.TemporaryDirectory() as td:

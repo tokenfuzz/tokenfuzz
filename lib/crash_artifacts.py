@@ -15,6 +15,7 @@ from typing import Iterable, Optional
 import stack_frames
 import report_identity
 import verdict
+from command_tools import marked_executable
 
 
 ARTIFACT_EXACT = {
@@ -490,9 +491,9 @@ def _nonempty_file(path: Path) -> bool:
 def is_executable_binary(path: Path) -> bool:
     import subprocess
 
-    # X_OK on a directory means "searchable", not "runnable", so the regular-file
-    # test has to come first: a build leaves `harness.dSYM/` beside `harness`.
-    if not path.is_file() or not os.access(path, os.X_OK):
+    # The mode bits, not access(X_OK), and only for a regular file: a build
+    # leaves `harness.dSYM/` beside `harness`, and a directory is searchable.
+    if not marked_executable(path):
         return False
     try:
         out = subprocess.run(
@@ -666,7 +667,10 @@ def is_testcase_candidate(path: Path, *, from_asan_header: bool = False,
         return False
     if _looks_like_asan_artifact(name):
         return False
-    if is_executable_binary(path):
+    # The probe's run header records the exact input it fed, so that record
+    # outranks the executable heuristic: a crafted ELF for a binary-format
+    # parser can carry an execute bit and still be the testcase.
+    if not from_asan_header and is_executable_binary(path):
         return False
     try:
         if path.stat().st_size < min_bytes:

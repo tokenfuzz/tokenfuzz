@@ -85,7 +85,89 @@ def _batches(*passes: dict | None):
     return fake
 
 
+def _accept_quality(directory: Path) -> Path:
+    """Write the two-vote accepted quality verdict for the current report."""
+    report = directory / "report.md"
+    vote = {"accept": True, "reason": "concrete", "class": "memory-safety", "severity": "High"}
+    cache = directory / ".llm-find-quality.json"
+    cache.write_text(json.dumps(triage._quality_payload(
+        report.read_text(encoding="utf-8"), [vote, vote], 2, 2,
+        triage.report_identity.content_sha1(report),
+    )), encoding="utf-8")
+    return cache
+
+
+def _quality_current(directory: Path) -> bool:
+    cache = directory / ".llm-find-quality.json"
+    report = directory / "report.md"
+    return triage._quality_cache_matches(
+        cache, json.loads(cache.read_text(encoding="utf-8")), report,
+        report.read_text(encoding="utf-8"),
+    )
+
+
 class ConvergeReachFields(unittest.TestCase):
+    def test_an_accepted_quality_verdict_survives_the_harness_annotation(self) -> None:
+        # A wall-cut pass that wrote the fields and stopped before finalizing
+        # left the verdict bound to the pre-annotation report: the finding
+        # dropped out of the live counts and its quorum was bought again.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            directory = _artifact(root, "findings", "FIND-0001")
+            _accept_quality(directory)
+            with mock.patch.object(triage, "_batch_decisions", _batches(FIRST_PASS, SECOND_PASS)):
+                triage.converge_reach_fields([directory])
+            self.assertIn("Caller contract:", (directory / "report.md").read_text(encoding="utf-8"))
+            self.assertTrue(_quality_current(directory))
+            # A verdict the author's own later edit already invalidated is not
+            # revived by the harness writing fields into the edited report.
+            edited = _artifact(root, "findings", "FIND-0002")
+            _accept_quality(edited)
+            with (edited / "report.md").open("a", encoding="utf-8") as stream:
+                stream.write("\nA second copy site shares the missing bound.\n")
+            with mock.patch.object(triage, "_batch_decisions", _batches(FIRST_PASS, SECOND_PASS)):
+                triage.converge_reach_fields([edited])
+            self.assertFalse(_quality_current(edited))
+
+    def test_an_author_edit_racing_the_annotation_is_never_inherited(self) -> None:
+        # The continuous gate can annotate a quiet report while its agent still
+        # runs. An edit landing just after the harness write, or between the
+        # verdict check and that write, must leave the verdict stale.
+        edit = "\nThe author revised the impact after review.\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            after = _artifact(root, "findings", "FIND-0001")
+            _accept_quality(after)
+            real_write = triage._atomic_write_text
+
+            def write_then_edit(path, text):
+                real_write(path, text)
+                if Path(path).name == "report.md":
+                    with Path(path).open("a", encoding="utf-8") as stream:
+                        stream.write(edit)
+
+            with mock.patch.object(triage, "_batch_decisions", _batches(FIRST_PASS)), \
+                    mock.patch.object(triage, "_atomic_write_text", write_then_edit):
+                triage.converge_reach_fields([after])
+            self.assertIn(edit.strip(), (after / "report.md").read_text(encoding="utf-8"))
+            self.assertFalse(_quality_current(after))
+
+            before = _artifact(root, "findings", "FIND-0002")
+            _accept_quality(before)
+            real_cache = triage._finding_cache
+
+            def edit_after_check(path):
+                cache = real_cache(path)
+                if Path(path).name == ".llm-find-quality.json":
+                    with (Path(path).parent / "report.md").open("a", encoding="utf-8") as stream:
+                        stream.write(edit)
+                return cache
+
+            with mock.patch.object(triage, "_batch_decisions", _batches(FIRST_PASS)), \
+                    mock.patch.object(triage, "_finding_cache", edit_after_check):
+                triage.converge_reach_fields([before])
+            self.assertFalse(_quality_current(before))
+
     def test_runs_to_a_fixed_point_then_leaves_a_later_pass_inert(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

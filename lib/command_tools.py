@@ -4,8 +4,24 @@
 from __future__ import annotations
 
 import os
+import stat
 from pathlib import Path
 from collections.abc import Iterable, Mapping
+
+
+def marked_executable(path: str | os.PathLike[str]) -> bool:
+    """Whether a regular file carries an execute bit.
+
+    For deciding what a file is (a built program rather than an input), read
+    the mode, not os.access: on a Docker Desktop bind mount access(X_OK)
+    reports a 0644 file executable to root, so an input whose bytes libmagic
+    calls "executable" was taken for a program.
+    """
+    try:
+        mode = os.stat(path).st_mode
+    except OSError:
+        return False
+    return stat.S_ISREG(mode) and bool(mode & 0o111)
 
 
 def find_executable(
