@@ -1,121 +1,136 @@
 # Environment variables
 
-TokenFuzz runs without an environment file. Prefer command flags for choices
-that belong to one run (`--target`, `--backend`, `--model`, `--strategy`)
-and `target.toml` for choices that belong to one target.
-
-This page lists operator overrides and explains the defaults that affect
-spend, session duration, backend selection, and diagnostics. Other variables
-are internal runtime state rather than a supported configuration interface.
-
-## Worker pool
-
-| Variable | Default | Use it for |
-| --- | --- | --- |
-| `NUM_AGENTS` | unset | A flat pool of `N` workers. On a browser target this replaces the browser/shell split. |
-| `BROWSER_AGENTS` | `1` | Browser-mode workers. Only applies when `[runner].args` declares a `{PROFILE}` page route; a browser-mode script engine gets shell workers only. |
-| `SHELL_AGENTS` | `2` beside browser workers, `3` otherwise | Shell/generic workers when `NUM_AGENTS` is unset. The default is fixed rather than CPU-sized. More workers increase concurrent spend and share the account's provider quota. |
-| `WORK_CARD_CLAIM_TTL_SECONDS` | `1800` | How long a work-card claim stays valid without its hypothesis closing. Thirty minutes is a safety net so a killed agent does not hold its card for a shift; raise it only for cards you know take longer. |
-| `RANK_WORK_LIMIT` | `120` | Size of the ranked work-card window an audit materializes. Widen it when `bin/state coverage` shows large files that were never offered. |
-
-A one-iteration smoke test always launches one worker, whatever these say.
+TokenFuzz needs no environment file. Use flags for choices that belong to
+one run (`--target`, `--backend`, `--model`, `--strategy`) and `target.toml`
+for choices that belong to one target. Set a variable for one command by
+prefixing it:
 
 ```bash
 NUM_AGENTS=4 bin/audit --target <target> --backend <backend>
 ```
 
+The page runs from the variables operators set routinely (worker pool,
+spend and time ceilings, model selection, local endpoint, agent security) to
+the rarely needed [tuning knobs](#tuning-knobs). A variable not listed here,
+such as `RESULTS_DIR`, `LOGDIR`, `ACTIVE_BACKEND`, `MODEL`, or
+`TOKENFUZZ_AGENT_SECURITY`, is runtime state the harness sets for its own
+child processes, a test hook, or internal tuning. It is not a supported
+interface.
+
+## Worker pool
+
+| Variable | Default | Use it for |
+| --- | --- | --- |
+| `NUM_AGENTS` | unset | A flat pool of `N` shell/generic workers. On a browser target it replaces the browser/shell split, so no browser-mode worker runs. |
+| `SHELL_AGENTS` | `2` beside browser workers, `3` otherwise | Shell/generic workers when `NUM_AGENTS` is unset. Slots refill until the run ends, so each extra worker adds concurrent spend against the account's provider quota. |
+| `BROWSER_AGENTS` | `1` | Browser-mode workers. Only a page browser gets them: a target whose `[runner].args`, or its build system's browser default, contain `{PROFILE}`. A browser-mode script engine gets shell workers only. |
+| `AGENT_ROLES` | unset | One role per slot, comma-separated, each `analysis` or `reproduce`, for example `reproduce,reproduce,analysis`. The count must equal the pool size or the run stops at startup. Unset, a multi-worker pool makes its last slot `analysis` and the rest `reproduce`. |
+
+A one-iteration smoke test always launches one worker.
+
 ## Spend and time ceilings
 
 | Variable | Default | Use it for |
 | --- | --- | --- |
-| `AUDIT_WALL_BUDGET_SECS` | `0` (off) | Wall-clock ceiling for a continuous run. The loop stops launching new iterations once it is spent, the simplest way to leave an overnight audit running with a hard stop. Provider quota pauses do not count against it. |
-| `STEWARD_INTERVAL_SECS` | `300` | Continuous runs only: seconds between steward ticks. A tick scores the generation, rotates starved strategy lanes, re-ranks the queue, and refreshes indexes without stopping any slot. Each tick is logged as an iteration. |
-| `AGENT_TIMEOUT` | `7200` seconds | Hard ceiling for one agent launch, and, in cohort mode (fixed-lane, delta, ensemble, and `--no-refill-workers` runs), for one iteration's pool of them. An early-finished slot is relaunched while a cohort-era peer is still running (one overtime session per slot), so this also bounds how far those replacements can push post-iteration triage out: every session in the iteration is clamped to what remains of the ceiling measured from when the iteration's first sessions started. |
-| `POOL_OVERTIME` | `cohort-era` | Cohort mode only; an ordinary run refills every slot to the wall. Decides which in-flight peer lets a slot that finished after the initial cohort drained take its one extra session. `cohort-era`: only an initial session or a refill launched beside one, so an overtime session never justifies another. `any-peer`: any peer, including another slot's overtime; the per-slot cap and the `AGENT_TIMEOUT` clamp still bound the iteration at one extra session per slot. Any other value is refused. |
-| `SHELL_SANITIZER_RUN_BUDGET` | `60` | Sanitizer runs one shell/generic agent may spend per iteration. |
-| `BROWSER_SANITIZER_RUN_BUDGET` | `25` | The same budget for browser-mode agents. |
-| `ASAN_TIMEOUT` | `15` seconds (`10` for JavaScript mode) | Deadline for one ordinary ASan probe. Setup uses the same deadline when proving that a generated ASan Python host can import the staged native package. |
-| `FUZZ_ASAN_TIMEOUT` | `600` seconds | Deadline for one ASan fuzz or fuzz-replay process. |
+| `AUDIT_WALL_BUDGET_SECS` | `0` (off) | Productive wall-clock budget: the simplest hard stop for an overnight audit. Sessions are clamped to what remains, and none starts once it is spent. Pauses for provider capacity or transient failures do not count; housekeeping does. |
+| `AGENT_TIMEOUT` | `7200` | Ceiling in seconds for one agent session. In cohort mode (fixed-strategy, delta, ensemble, and `--no-refill-workers` runs) it also bounds one iteration: every session in it, refills included, is clamped to what remains, measured from the iteration's first launch. |
+| `SHELL_SANITIZER_RUN_BUDGET` | `60` | Sanitizer runs one shell/generic slot may spend per iteration. |
+| `BROWSER_SANITIZER_RUN_BUDGET` | `25` | The same budget for browser-mode slots. |
+| `SANITIZER_RUN_BUDGET_PER_ITERATION` | unset | When set, replaces both budgets above for every slot. |
 
-To bound an ordinary run, the positional iteration count is clearer than any
-of these:
+For an ordinary run, the positional iteration count is the clearer bound:
 
 ```bash
 bin/audit --target <target> --backend <backend> 10
 ```
 
-## When a run stops or restarts by itself
+### When a run stops or restarts by itself
 
-Two defaults end something on their own. Both announce themselves in the
-log, so this section is mostly here to explain what you are reading.
+These act on their own and announce themselves in `index.log`.
 
 | Variable | Default | What it controls |
 | --- | --- | --- |
-| `MAX_DRY_SESSIONS` | `10` | A continuous run stops once this many generations (steward ticks, or cohort iterations in cohort mode) in a row produce nothing *and* no hypothesis is still open, logging `STALL_STOP`. Raise it for a hard target you expect to be slow; a value too low to let S1 finish its longer dry runway is raised to nine. |
-| `TURN_SOFT_CAP` | `128` agent/tool turns | Rollover target for a long audit session. Claude, Grok, and current Google Gemini CLI versions use native turn limits; Gemini retains a completed-tool fallback for older versions. Codex and OpenCode use completed tool events as the safe termination boundary. Antigravity (`agy`) has neither a native turn flag nor a stable completed-tool event contract, so its prompt carries the same cooperative target but only `AGENT_TIMEOUT` can hard-stop it. Capped sessions continue from structured state; the log says `turn-capped; continuing from state`, and the transcript ends with `TURN_SOFT_CAP reached …`. Set `0` to disable. |
-| `CONTEXT_SOFT_CAP` | `0` (off) | Optional context-size rollover for a long audit session, in prompt tokens, on backends that report per-request usage in their stream (Claude, Grok). Every turn replays the whole transcript, so a session past this size pays more per step than a fresh one resumed from state; once reached, the session ends when no tool is in flight, exactly like a `TURN_SOFT_CAP` rollover, with the transcript ending `TURN_SOFT_CAP reached at N context tokens …`. Off by default because backends that report usage only at exit cannot be bounded this way, and a cap that fires for one benchmark condition and not another is not a fair comparison; set it only on a run where every compared backend reports per-request usage. |
+| `MAX_DRY_SESSIONS` | `10` | The run stops with `STALL_STOP` once this many iterations in a row produce nothing *and* no hypothesis is open. Raise it for a hard target. Values below `9` are raised to `9`, so S1 can finish its longer dry runway. |
+| `TURN_SOFT_CAP` | `128` | Session rollover target, in agent turns or completed tool calls depending on the backend (below). The session exits cleanly, the log says `turn-capped; continuing from state`, the transcript ends with `TURN_SOFT_CAP reached …`, and the next session resumes from structured state. `0` disables it. |
+| `CONTEXT_SOFT_CAP` | `0` (off) | Rollover once a request's prompt reaches this many tokens, only on backends that report usage per request (Claude Code, Grok Build). It ends the session the same way; the transcript ends `TURN_SOFT_CAP reached at N context tokens …`. In a benchmark, set it only when every compared backend reports per-request usage, or the conditions are not comparable. |
 
-Already checkpointed hypotheses and artifacts are preserved. The next
-iteration resumes them from structured state; work not checkpointed before a
-backend's turn boundary may need to be repeated.
+| Backend | How `TURN_SOFT_CAP` is enforced |
+| --- | --- |
+| Claude Code, Grok Build | The CLI's native `--max-turns`. |
+| Google Gemini CLI | The native `maxSessionTurns` setting, plus a completed-tool-call count for older versions that ignore it. |
+| Codex, OpenCode | TokenFuzz ends the session after that many completed tool calls. |
+| Antigravity (`agy`) | Not enforceable: the prompt states the target, and only `AGENT_TIMEOUT` hard-stops the session. |
 
-A lower cap creates more continuations and can reduce the context carried by
-each session. Check both cost and incomplete-artifact rates before adopting
-a different value:
+Turns and tool calls are different units, so treat the value as a rollover
+target, not a request quota. Checkpointed hypotheses and artifacts survive a
+rollover; work not yet checkpointed may be repeated. Check cost and
+incomplete-artifact rates before adopting another value:
 
 ```bash
 TURN_SOFT_CAP=100 bin/audit --target <target> --backend <backend>
 ```
 
-Native model turns and completed-tool events are not identical units, so
-treat the value as a cross-backend rollover target rather than an exact
-request quota.
-
 ## Model selection
 
-Use `--backend` and `--model` for reproducible commands. These overrides are
-for a shared shell, or a backend binary outside `PATH`.
+Use `--backend` and `--model` in reproducible commands. These variables
+suit a shared shell or a backend binary outside `PATH`.
 
 | Variable | Default | Use it for |
 | --- | --- | --- |
-| `AUDIT_BACKEND` | `all` | Backend used when `--backend` is omitted. |
-| `CLAUDE_MODEL_DEFAULT` | `config/models.toml` | Default Claude model. |
-| `CODEX_MODEL_DEFAULT` | `config/models.toml` | Default Codex model. |
-| `GEMINI_MODEL_DEFAULT` | `config/models.toml` | Default Gemini model. |
-| `GROK_MODEL_DEFAULT` | `config/models.toml` | Default Grok model. |
-| `CLAUDE_BIN` / `CODEX_BIN` / `GEMINI_BIN` / `GROK_BIN` / `OPENCODE_BIN` | the CLI's own name (`agy` for Gemini) | Backend executable outside `PATH`. |
-| `USE_GEMINI_CLI` | `0` | Use Google Gemini CLI instead of the default Antigravity CLI. |
-| `CLAUDE_CODE_PROMPT_CACHE_TTL` | unset | Claude Code's prompt-cache write tier (`5m` or `1h`). TokenFuzz sets `5m` on every Claude launch it makes (agent sessions, validators, and decision calls) to reduce cache-write cost for closely spaced requests; see the [cost model](../concepts/cost-model.md#what-prompt-caching-can-reuse). Set it yourself to override. Cost tier only; it never changes model behaviour. |
-| `BASH_DEFAULT_TIMEOUT_MS`, `BASH_MAX_TIMEOUT_MS` | unset | Claude Code's Bash command timeouts. TokenFuzz sets both to one hour on every Claude launch it makes, because Claude Code moves a command still running at its 120-second default to the background, and a headless session then exits without the result: a fuzz campaign or long probe must finish in the foreground. The session's own wall still bounds every command. Set either yourself to override. |
-| `AUDIT_MODEL_PREFLIGHT` | `1` | Before starting, launch the selected model once through the real agent path, with the same granted directories as an audit session and the audit guide in the prompt, and require it to run a command that writes into the target tree. A backend that can reply but cannot act, a CLI that silently serves a different model, or a model whose safeguards refuse the audit workload fails here rather than spending the run. Set `0` only for an intentionally offline or mock run. |
-| `AUDIT_MODEL_PREFLIGHT_TIMEOUT` | `60` seconds (`300` for Google Gemini CLI) | Ceiling on each preflight attempt. Raise it when a slow local model loses the probe and the audit never reaches its first agent. |
-| `AUDIT_MODEL_PREFLIGHT_ATTEMPTS` | `3` | How many times the preflight probe is retried on a transient failure before the run stops. |
+| `AUDIT_BACKEND` | `all` | Backend used when `--backend` is omitted. It also pins the backend `bin/setup-target` uses for its model helpers; `all` leaves them unpinned. |
+| `CLAUDE_MODEL_DEFAULT`, `CODEX_MODEL_DEFAULT`, `GROK_MODEL_DEFAULT` | `[models]` in `config/models.toml` | Default Claude Code, Codex, or Grok model. |
+| `GEMINI_MODEL_DEFAULT` | `[models]` in `config/models.toml` | Default Gemini model, for both Antigravity and Google Gemini CLI. |
+| `CLAUDE_BIN`, `CODEX_BIN`, `GEMINI_BIN`, `GROK_BIN`, `OPENCODE_BIN` | `claude`, `codex`, `agy` (`gemini` when `USE_GEMINI_CLI=1`), `grok`, `opencode` | Backend executable outside `PATH`. |
+| `USE_GEMINI_CLI` | unset | `1` makes the `gemini` backend use Google Gemini CLI instead of Antigravity (`agy`). |
+| `CODEX_HOME` | `~/.codex` | Codex's home directory. TokenFuzz reads `config.toml` there to switch off your MCP servers and `notify` hook for each launch, and reads session rollouts under `sessions/` to measure usage, deleting the ones it fully resolves. |
+| `AUDIT_MODEL_PREFLIGHT` | `1` | `0` skips the [model preflight](../guides/backends.md#model-preflight), the one real agent launch that must write into the target tree before the run starts. Only for an intentionally offline or mock run. |
+| `AUDIT_MODEL_PREFLIGHT_TIMEOUT` | `60` seconds (`300` for Google Gemini CLI) | Ceiling on each preflight attempt. Raise it when a slow local model never gets past startup. |
+| `AUDIT_MODEL_PREFLIGHT_ATTEMPTS` | `3` | Total preflight attempts, 15 and then 60 seconds apart. A provider refusal or a substituted model stops at once. |
 
 Model precedence is `--model`, then the matching `*_MODEL_DEFAULT`, then
-`config/models.toml`. The `oss` backend has no default: always pass the
-exact served model name with `--model`.
+`config/models.toml`. Reasoning effort comes only from that file's `[effort]`
+table. The `oss` backend has no default model: always pass the served name
+with `--model`. See
+[Models and reasoning effort](../guides/backends.md#models-and-reasoning-effort).
 
-Authentication variables such as `GEMINI_API_KEY`, `GOOGLE_API_KEY`, and
-`XAI_API_KEY` belong to the backend CLI. TokenFuzz forwards selected
-credentials only when `bin/audit-container-shell --forward-credentials` is
-used. Keep keys out of `target.toml`, reports, and committed shell files.
+### Claude Code settings TokenFuzz applies
+
+Every Claude launch TokenFuzz makes (agent sessions, validators, and
+decisions) gets these unless you set them yourself:
+
+| Variable | Value TokenFuzz sets | Why |
+| --- | --- | --- |
+| `CLAUDE_CODE_PROMPT_CACHE_TTL` | `5m` | The five-minute cache-write tier is cheaper for an audit's closely spaced requests; see the [cost model](../concepts/cost-model.md#what-prompt-caching-can-reuse). It changes cost, never model behaviour. Setting this variable or `FORCE_PROMPT_CACHING_5M` to any value keeps your choice. |
+| `BASH_DEFAULT_TIMEOUT_MS`, `BASH_MAX_TIMEOUT_MS` | `3600000` (one hour) | Claude Code backgrounds a command still running at its 120-second default, and a headless session then exits without the result. Fuzz campaigns and long probes must finish in the foreground; the session's own wall still bounds them. |
+
+### Credentials
+
+Authentication variables such as `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
+`GEMINI_API_KEY`, `GOOGLE_API_KEY`, and `XAI_API_KEY` belong to the backend
+CLI. TokenFuzz reads them only to forward them into a container under
+`--forward-credentials` (see [Container runtime](#container-runtime)). Agent
+sessions inherit the environment of the shell that runs `bin/audit`, so
+agent commands can read any credential exported there. Keep keys out of
+`target.toml`, reports, and committed shell files.
+
+## Agent security
+
+The execution boundary is the `--agent-security` flag; see
+[Agent security modes](../guides/backends.md#agent-security-modes).
+
+| Variable | Default | Use it for |
+| --- | --- | --- |
+| `IS_SANDBOX` | unset | `1` asserts that an outer container or VM you administer is the boundary for `--agent-security external-bypass`. It only silences the one-time warning an unasserted bypass prints: it does not change the mode, and TokenFuzz does not verify it. `bin/audit-container-shell` sets it. |
 
 ## Local model endpoint
 
+These apply to `--backend oss` with a served model id; an `opencode/<id>`
+catalog model ignores them.
+
 | Variable | Default | Use it for |
 | --- | --- | --- |
-| `AUDIT_LOCAL_BASE_URL` | `http://127.0.0.1:8000/v1` | OpenAI-compatible endpoint used by `--backend oss`. TokenFuzz appends `/v1` when omitted. |
-| `AUDIT_LOCAL_API_KEY` | `EMPTY` | Token for a local endpoint that requires authentication. |
-| `LLM_DECISION_TIMEOUT` | `45` seconds hosted, `180` for `oss` | Ceiling on each audit-time ranking, peer-mapping, triage, and validation decision. Setting it applies to *every* decision, including the two below. Stage deadlines may shorten it. |
-| `RANK_WORK_LLM_TIMEOUT` | unset | Override `LLM_DECISION_TIMEOUT` for work-card reranking only. The `bin/rank-work --llm-timeout` flag takes precedence over both. |
-| `RANK_WORK_LLM_MODE` | `boost` | How far the rerank verdict reaches. `boost` adds a bounded increment to the deterministic score; `primary` sorts the ranked window by the model's score, with the deterministic score breaking ties, inside each buildability tier. In both modes the model reorders the cards it was shown (it cannot add or drop one), and in `primary` mode it cannot lift a card across a buildability tier; on timeout or malformed output the deterministic order stands. The `bin/rank-work --llm-mode` flag takes precedence. |
-
-Every decision launches a full agent CLI rather than a single chat
-completion, so its floor is a process launch plus a reasoning turn. A few
-decisions have been observed to complete well past the ceiling above and get
-a longer built-in default, scaled by the same hosted-to-`oss` ratio so a
-slow local-inference host gets proportionally more room. Setting
-`LLM_DECISION_TIMEOUT` replaces those defaults too.
+| `AUDIT_LOCAL_BASE_URL` | `http://127.0.0.1:8000/v1` | OpenAI-compatible endpoint. TokenFuzz adds `http://` when no scheme is given, drops a trailing `/`, and appends `/v1` when it is missing. |
+| `AUDIT_LOCAL_API_KEY` | `EMPTY` | Key for an endpoint that requires authentication. The literal `EMPTY` is sent when it is unset. |
 
 For Ollama:
 
@@ -124,109 +139,206 @@ export AUDIT_LOCAL_BASE_URL=http://127.0.0.1:11434/v1
 bin/audit --target <target> --backend oss --model <served-model>
 ```
 
-A slow local model is where these bite. If the audit never gets past
-startup, the model is losing the launch probe: raise
-`AUDIT_MODEL_PREFLIGHT_TIMEOUT`. If agents work but findings sit
-unvalidated, decisions are timing out: raise `LLM_DECISION_TIMEOUT`. Both are
-normal on CPU inference or a large model on modest hardware, and neither
-means the model is misconfigured.
+`python3 lib/llm_invoke.py local-model-available --model <served-model>`
+exits 0 when the endpoint's `/models` list contains that id.
 
-## LLVM selection
+Slow local models hit timeouts. That is normal on CPU inference or modest
+hardware and does not mean the model is misconfigured:
 
-| Variable | Default | Use it for |
-| --- | --- | --- |
-| `LLVM_PREFIX` | auto-detected | Select an LLVM installation when the wrong `clang`, `llvm-symbolizer`, or `sancov` would otherwise be used. |
+- The audit never gets past startup: raise `AUDIT_MODEL_PREFLIGHT_TIMEOUT`.
+- Agents work but findings sit unvalidated: raise `LLM_DECISION_TIMEOUT`
+  (see [Model decisions](#model-decisions)).
 
-Homebrew LLVM and common Linux prefixes are detected automatically. Set this
-only on hosts with several installations:
+## Container runtime
 
-```bash
-LLVM_PREFIX=/opt/homebrew/opt/llvm bin/audit --target <target> --backend <backend> 1
-```
+`bin/audit-container-shell` has flags for its normal choices; prefer them in
+scripts, where the command under review shows them. What the container
+isolates is under
+[Containerised backend shell](../guides/backends.md#containerised-backend-shell).
+
+| Variable | Flag | Default | Purpose |
+| --- | --- | --- | --- |
+| `CONTAINER_RUNTIME` | `--runtime` | `docker` | Container CLI. Only Docker is supported. |
+| `AUDIT_DOCKER_RUNTIME` | `--docker-runtime` | Docker's default | OCI runtime passed to `docker run`; `--gvisor` selects `runsc`. |
+| `AUDIT_FORWARD_CREDENTIALS` | `--forward-credentials` | off | `1` forwards the credential variables below and mounts Google credentials read-only. |
+| `AUDIT_CONTAINER_NO_NEW_PRIVS` | none | `1` | `0` drops `--security-opt no-new-privileges` from `docker run`. |
+| `AUDIT_CONTAINER_AUTO_START` | none | `1` | `0` stops the helper from trying to start an unreachable Docker daemon (Docker Desktop or Colima on macOS, `systemctl --user start docker` on Linux). |
+| `AUDIT_CONTAINER_START_TIMEOUT` | none | `60` | Seconds to wait for that daemon. |
+| `CLAUDE_NPM_SPEC`, `CODEX_NPM_SPEC`, `GEMINI_CLI_NPM_SPEC`, `OPENCODE_NPM_SPEC` | none | `@anthropic-ai/claude-code@latest`, `@openai/codex@latest`, `@google/gemini-cli@latest`, `opencode-ai@latest` | npm packages `--rebuild` installs. Pin versions for a reproducible image. |
+| `AGY_INSTALL_URL`, `GROK_INSTALL_URL` | none | `https://antigravity.google/cli/install.sh`, `https://x.ai/cli/install.sh` | Installer scripts `--rebuild` downloads and runs. |
+
+`--forward-credentials` forwards whichever of `ANTHROPIC_API_KEY`,
+`CLAUDE_CODE_OAUTH_TOKEN`, `OPENAI_API_KEY`, `GEMINI_API_KEY`,
+`GOOGLE_API_KEY`, `XAI_API_KEY`, `GOOGLE_CLOUD_PROJECT`,
+`GOOGLE_CLOUD_QUOTA_PROJECT`, and `USE_GEMINI_CLI` are set on the host. It
+also mounts the file `GOOGLE_APPLICATION_CREDENTIALS` names, and
+`~/.config/gcloud` if it exists, read-only. `--env-file` passes any other
+variable.
+
+Each container start runs `tests/run-tests.sh --install-container-deps`;
+pass `AUDIT_CONTAINER_INSTALL_DEPS=0` through `--env-file` to skip it.
+
+Inside the container the helper sets runtime state you should not set by
+hand: `IS_SANDBOX=1`, and `AUDIT_BUILD_SUFFIX=-<image-id>` so each image
+gets its own `build-asan-<image-id>/` tree (a suffix already set on the host
+is forwarded instead). `bin/benchmark --isolate-build` appends
+`+bench-<input-hash>` to the suffix the same way.
 
 ## Directed fuzzing
 
 | Variable | Default | Use it for |
 | --- | --- | --- |
-| `FUZZ_SEED_CORPUS_DIR` | unset | A local directory of extra seed inputs (an OSS-Fuzz or ClusterFuzz corpus you staged) to fill an empty S4 corpus alongside the target's own test data. Local only; nothing is fetched over the network. |
+| `FUZZ_SEED_CORPUS_DIR` | unset | A local directory of extra seed inputs, such as an OSS-Fuzz or ClusterFuzz corpus you staged, used to fill an empty S4 corpus alongside the target's own test data. Nothing is fetched over the network. |
 
-The path is read only when a harness's corpus is empty, and its inputs are
-bounded by the same size and count limits as the in-tree seeds.
+It is read only when a harness's corpus is empty. Every file under it except
+source and build files is a candidate, within the same size and count limits
+as in-tree seeds.
 
 ```bash
 FUZZ_SEED_CORPUS_DIR=/data/oss-fuzz-corpora/<project> bin/audit --target <target> --backend <backend>
 ```
 
-## Container runtime
+## Toolchain selection
 
-`bin/audit-container-shell` has flags for its normal choices, and flags are
-better in scripts because they are visible in the command under review.
-
-| Variable | Flag equivalent | Purpose |
+| Variable | Default | Use it for |
 | --- | --- | --- |
-| `CONTAINER_RUNTIME` | `--runtime` | Container CLI. The current helper accepts Docker. |
-| `AUDIT_DOCKER_RUNTIME` | `--docker-runtime` | OCI runtime passed to `docker run`; `--gvisor` selects `runsc`. |
-| `AUDIT_FORWARD_CREDENTIALS` | `--forward-credentials` | Set to `1` to forward supported credential variables and read-only Google ADC files into the container. Off by default. |
-
-Inside the container helper, `AUDIT_BUILD_SUFFIX` is set for you so each
-image gets its own `build-asan-<image-id>/` tree, and `IS_SANDBOX=1` is set
-because the container is the boundary `--agent-security external-bypass`
-relies on. `bin/benchmark --isolate-build` sets the suffix the same way, to
-`+bench-<input-hash>`. Both are runtime state; do not set them by hand.
-
-## Build leases and source pins
-
-Every process that executes a sanitizer build holds a shared lease on it,
-and every rebuild takes the matching exclusive one, so a build is never
-replaced while a run is using it. A run additionally pins the source state
-it is auditing, which is what catches two runs reading one checkout at
-different states, something a per-build lock cannot see.
-
-Both are advisory kernel locks under `targets/<slug>/.audit/`
-(`build-locks/<build-dir>.lock` and `source-pins/<pid>.pin`), released when
-the holder exits and needing no cleanup. There is nothing to configure, and
-they bind only harness commands; a build tool invoked by hand is outside
-them.
+| `LLVM_PREFIX` | auto-detected | The LLVM installation whose `llvm-symbolizer`, `sancov`, and `llvm-cxxfilt` TokenFuzz uses. A tool not under `$LLVM_PREFIX/bin` is looked for in `/opt/homebrew/opt/llvm`, `/usr/local/opt/llvm`, `/usr/lib/llvm-*` in name order, `/usr/local`, and then `PATH`. It does not choose the compiler. Set it only on hosts with several installations. |
+| `AUDIT_JAVA_HOME` | unset | JDK for Java targets. Discovery tries `AUDIT_JAVA_HOME`, then `JAVA_HOME`, then `PATH`; see [Multi-language targets](../guides/multi-language.md). |
 
 ## One-off probe selection
 
-`bin/probe` normally uses the first enabled sanitizer in `target.toml`. For a
-deliberate one-off comparison:
+`bin/probe` uses the first enabled sanitizer in `target.toml`, or `runner`
+when `[sanitizer].enabled = []`. For a deliberate one-off comparison:
 
 ```bash
 PROBE_SANITIZER=msan bin/probe output/<target>/<backend>/results/scratch-1/testcase
 ```
 
-Valid values are `asan`, `ubsan`, `msan`, `tsan`, `race`, and `runner`, and
-the sanitizer must be enabled for the target. Persistent policy belongs in
-`[sanitizer].enabled`, not in the environment.
+`PROBE_SANITIZER` takes `asan`, `ubsan`, `msan`, `tsan`, `race`, or
+`runner`. `bin/probe` refuses a sanitizer not in `[sanitizer].enabled`
+unless `PROBE_ALLOW_DISABLED_SANITIZER=1` is also set, and refuses every
+sanitizer but `runner` when `[sanitizer].enabled = []`. Persistent policy
+belongs in `[sanitizer].enabled`.
 
-To compare ASan build configurations, select a ready named configuration or
-force the canonical control:
+These replace the matching `target.toml` field for one probe; a relative
+path resolves against the target root:
+
+| Variable | Replaces |
+| --- | --- |
+| `TARGET_ASAN_BIN`, `TARGET_ASAN_LIB` | `asan_bin`, `asan_lib` |
+| `TARGET_UBSAN_BIN`, `TARGET_UBSAN_LIB`, `TARGET_MSAN_BIN`, `TARGET_MSAN_LIB`, `TARGET_TSAN_BIN`, `TARGET_TSAN_LIB` | `[sanitizer].<san>_bin`, `[sanitizer].<san>_lib` |
+| `TARGET_RUNNER_BIN` | `[runner].bin` |
+
+`PROBE_BUILD_CONFIG` selects a ready ASan
+[build configuration](target-toml.md#build-configurations) by name, or
+`primary` for the canonical control. Normal audits assign configurations
+automatically and compare an alternate-build crash against the primary
+without it.
 
 ```bash
 PROBE_BUILD_CONFIG=compact bin/probe .../scratch-1/testcase
 PROBE_BUILD_CONFIG=primary bin/probe .../scratch-1/testcase
 ```
 
-Normal audits assign this automatically, and a confirmed crash from an
-alternate build is compared against the primary without any override.
+## Tuning knobs
 
-## Probe output capture
+The defaults below are measured. Change one only for a reason you can
+state, and record the change with the results: review-gate and clustering
+values in particular make results incomparable with default runs.
 
-`bin/probe` classifies a diagnostic before limiting its saved size. By
-default, an output larger than 8 MiB is replaced with an explicit truncation
-marker plus its first and last 256 KiB. For a deliberate full-capture rerun:
+### Work queue and scheduling
 
-```bash
-PROBE_ASAN_OUTPUT_MAX_BYTES=0 bin/probe .../scratch-1/testcase
-```
+| Variable | Default | What it controls |
+| --- | --- | --- |
+| `WORK_CARD_CLAIM_TTL_SECONDS` | `1800` | How long a work-card claim stays valid without its hypothesis closing, so a killed agent does not hold its card. Raise it only for cards known to take longer. |
+| `RANK_WORK_LIMIT` | `120` | Distinct source files in the first ranked work-card window. The window grows by the same step once every card in it has been worked. Widen it when `bin/state coverage` shows large files never offered early. |
+| `RANK_WORK_DIVERSITY_FLOOR` | `12` | Window slots reserved for low-scoring files, picked round-robin across subsystems, so the ranking regexes do not define the audit's scope. Never more than a fifth of the window; `0` turns it off. See [how the visible window is filled](../concepts/strategy-model.md#how-the-visible-window-is-filled). |
+| `WORK_CARD_MIN_RUNS_BEFORE_DISCARD` | `3` | Card-linked `CLEAN` probe runs a card needs before an agent may discard it. The prompt and `bin/state update-card` read the same value. |
+| `WORK_CARD_MIN_HYPS_BEFORE_DISCARD` | `2` | Distinct hypotheses those runs must span. |
+| `STEWARD_INTERVAL_SECS` | `300` | Continuous runs: seconds between steward ticks. Every tick re-ranks the queue and releases stale claims without stopping a slot. A tick in which a session ended also scores the generation, rotates starved strategy lanes, renews per-iteration budgets, and counts as an iteration everywhere on this page. Index maintenance waits for the final barrier. |
+| `POOL_OVERTIME` | `cohort-era` | Cohort mode with refills only. After the initial cohort drains, each slot may take one extra session while a peer still runs. `cohort-era` counts only an initial session, or a refill launched beside one, as that peer, so one overtime session never justifies another; `any-peer` counts any running peer. Any other value is refused. |
+| `LLM_DECIDE_MAX_CALLS` | `1000` | One-shot model decisions per iteration, counted separately for the harness process and each agent slot. Once spent, decisions return no answer until the next iteration, and callers treat that as a failed decision. `0` removes the cap. The budgeted sweep is always uncapped; its token budget bounds it. |
 
-This can create a very large file. Use it only when the saved marker shows
-that the omitted middle contains context needed for review.
+### Sanitizer deadlines
 
-The terminal digest also shortens the middle of any single line longer than
-4,096 characters, a common shape for Java classpaths and generated data. The
-line shortening affects terminal display only; saved probe output remains
-subject to the file-size limit above. Set `SANITIZER_DIGEST_LINE_CHARS` to
-another limit, or to `0` to show full lines.
+| Variable | Default | Use it for |
+| --- | --- | --- |
+| `ASAN_TIMEOUT`, `UBSAN_TIMEOUT`, `MSAN_TIMEOUT`, `TSAN_TIMEOUT` | `15` seconds (`10` in JavaScript mode) | Deadline for one ordinary probe run. UBSan's fuzz modes also read `UBSAN_TIMEOUT`, with a `600` default. Setup uses `ASAN_TIMEOUT` when proving that a generated ASan Python host can import the staged native package. |
+| `FUZZ_ASAN_TIMEOUT`, `FUZZ_MSAN_TIMEOUT`, `FUZZ_TSAN_TIMEOUT` | `600` seconds | Deadline for one fuzz process. |
+| `ASAN_FUZZ_REPRO_TIMEOUT`, `UBSAN_FUZZ_REPRO_TIMEOUT`, `MSAN_FUZZ_REPRO_TIMEOUT`, `TSAN_FUZZ_REPRO_TIMEOUT` | `20` seconds | Deadline for replaying one fuzzer crash file. |
+
+### Model decisions
+
+Ranking, peer mapping, triage, and validation use one-shot model decisions.
+Each launches a full agent CLI, so its floor is a process launch plus a
+reasoning turn.
+
+| Variable | Default | Use it for |
+| --- | --- | --- |
+| `LLM_DECISION_TIMEOUT` | `45` seconds hosted, `180` for `oss`; longer for the decisions below | Ceiling on each decision. Setting it replaces every default, including those below. When it is unset, the finding gate's quality votes use `300` seconds. A stage deadline may shorten any call, and `bin/audit` refuses a value that is not a positive whole number. |
+| `RANK_WORK_LLM_TIMEOUT` | unset | Override for the work-card rerank only. `bin/rank-work --llm-timeout` takes precedence. |
+| `RANK_WORK_LLM_MODE` | `boost` | `boost` adds a bounded increment to the deterministic score; `primary` orders the ranked window by the model's score, with the deterministic score breaking ties, inside each buildability tier. Either way the model only reorders the cards it was shown, and on timeout or malformed output the deterministic order stands. `bin/rank-work --llm-mode` takes precedence. |
+
+Decisions observed to run long have their own defaults, scaled from hosted
+to `oss` by the same ratio:
+
+| Decision | Hosted | `oss` |
+| --- | --- | --- |
+| `build-script-converge` | 100 s | 400 s |
+| `reachability_fields_batch` | 120 s | 480 s |
+| `work_rerank` | 150 s | 600 s |
+| `trigger_validator` | 700 s | 2800 s |
+| `cluster_expand` | 800 s | 3200 s |
+
+### Review gates
+
+These change the review standard in
+[Triage results](../guides/triage-results.md).
+
+| Variable | Default | What it controls |
+| --- | --- | --- |
+| `FIND_GATE_ACCEPT_QUORUM` | `2` | Accept votes that admit a finding at the substance gate. |
+| `FIND_GATE_QUORUM` | `2` | Reject votes that move a finding to `findings-rejected/`. At most `accept + reject − 1` votes are cast. |
+| `CRASH_TRIGGER_GATE` | `1` | `0` skips the source-reading trigger review of kept crashes. |
+| `CRASH_PROMOTION_PENDING_MAX` | `10` | Consecutive triage passes an incomplete crash bundle stays pending before it is rejected with a `POSSIBLE-FALSE-NEGATIVE` warning. |
+| `LLM_FIELD_FILL_MAX_ATTEMPTS` | `2` | Answered model asks a report gets to fill its missing structured fields. Timeouts and unusable output do not count. |
+| `LLM_FIELD_FILL_DISABLE` | unset | `1` skips that fill, so reports keep only the fields their authors wrote. |
+| `REPORT_GATE_MAX_BYTES` | `98304` (96 KiB) | Largest report a review gate reads whole. A longer one is sent as the first three quarters and last quarter of this size, with a warning on stderr. |
+
+### Clustering and indexes
+
+The rules are in [Deduplication](../concepts/deduplication.md).
+
+| Variable | Default | Use it for |
+| --- | --- | --- |
+| `CLUSTER_LCS_THRESHOLD` | `2` | Frames two crash states must share, as a longest common subsequence, to merge. Values below `1` count as `1`. |
+| `CLUSTER_FUZZY_MATCH` | off | `1`, `true`, `yes`, or `on` enables per-line fuzzy similarity for crash states. Off because it merged distinct bugs in earlier runs. |
+| `CLUSTER_FUZZY_THRESHOLD` | `0.9` | Similarity fuzzy matching requires, clamped to `0`–`1`. |
+| `CLUSTER_HTML` | on | `0` stops the cluster tools writing HTML cluster pages and HTML copies of member reports; the Markdown indexes remain. |
+| `INDEX_HTML_AUTO` | `1` | `0` keeps index maintenance Markdown-only: member reports are not enriched or rendered to HTML, and the rejected indexes get no HTML page. |
+| `ENRICH_REPORT_AUTO` | `1` | `0` skips `bin/enrich-report` during index maintenance. |
+
+### Benchmark finalization
+
+After the audit wall, `bin/benchmark` drains crash triage and the finding
+gate, pausing when a provider limits the reviewers. See
+[the benchmark design](../concepts/benchmark.md).
+
+| Variable | Default | Use it for |
+| --- | --- | --- |
+| `FIND_GATE_MAX_PAUSES` | `12` | Provider-limit pauses one drain may take before it stops and leaves the rest unjudged. |
+| `FIND_GATE_PAUSE_MAX_TOTAL` | `21600` (six hours) | Total seconds one drain may pause. |
+| `FIND_GATE_PAUSE_CHUNK` | `1800` | Pause length when the provider reports no reset time; with one, the drain waits until the reset plus 30 seconds. Every pause is clamped to what remains of `--finalize-wall`. |
+| `BENCHMARK_RUNID` | unset | Run id used when `--run-id` is not given. |
+
+A drain that stops early logs why; `--regenerate` resumes from saved
+receipts.
+
+### Probe output and memory limits
+
+| Variable | Default | Use it for |
+| --- | --- | --- |
+| `PROBE_ASAN_OUTPUT_MAX_BYTES` | `8388608` (8 MiB) | Largest probe output saved whole. A larger one is saved as a truncation marker plus its head and tail. The diagnostic is classified before truncation. `0` saves everything, which can create a very large file; use it only when the marker shows the omitted middle matters for review. |
+| `PROBE_ASAN_OUTPUT_HEAD_BYTES`, `PROBE_ASAN_OUTPUT_TAIL_BYTES` | `262144` (256 KiB) each | Head and tail kept from a truncated output. |
+| `SANITIZER_DIGEST_LINE_CHARS` | `4096` | The terminal digest shortens the middle of a longer line, such as a Java classpath. Display only; saved output follows the limits above. `0` shows full lines. |
+| `PROBE_RSS_LIMIT_MB` | `5120` | A generic-mode probe process is killed once its resident memory passes this, to protect the host. Raise it for a target that legitimately needs more; `0` turns the limit off. |

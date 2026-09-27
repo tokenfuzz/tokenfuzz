@@ -1,60 +1,106 @@
 # First audit
 
-Run one bounded audit before committing time or model budget to a continuous
-session. The smoke test verifies the target config, build preflight, backend,
-state store, and output layout. An empty findings directory is a normal
-outcome.
+Run one bounded audit before you commit time or model budget to a longer
+session. The smoke test checks the target config, build preflight, backend,
+state store, and output layout together. An empty findings directory is a
+normal outcome.
 
-Complete [Prerequisites](prerequisites.md) and [Add a target](add-a-target.md)
-first. Run the audit in a container or on an isolated host without long-lived
-credentials: target builds and agent-driven testcases execute code from the
-audited tree.
+You need the [prerequisites](prerequisites.md) and a configured target:
+a [sample target](sample-targets.md) or one you [added](add-a-target.md).
 
-Set short shell variables for the commands on this page. Use an explicit
-backend so the output path is predictable:
+## Where to run the audit
+
+Target builds and agent-driven testcases execute code from the audited tree,
+so run in a container or on an isolated host without long-lived credentials.
+The recommended default is `bin/audit-container-shell`. It isolates target
+build scripts and agent tool use from most of the host filesystem while
+keeping the checkout and output in the mounted repository:
 
 ```bash
-export TARGET="<target>"
-export BACKEND=claude               # or codex, gemini, grok, oss
-export RESULTS="output/$TARGET/$BACKEND/results"
-export LOGS="output/$TARGET/$BACKEND/logs"
+bin/audit-container-shell --rebuild   # first use: build the image
+bin/audit-container-shell             # later uses
 ```
 
+The helper opens a shell at `/root/work` with the backend CLIs installed. It
+does not start the audit, and it does not mount host CLI credential
+directories: log in inside the shell, or pass `--forward-credentials`. If the
+backend's own sandbox cannot start inside the container, run with
+`--agent-security external-bypass`; the container is then your boundary.
+[Container runtime](prerequisites.md#container-runtime-recommended) covers
+Docker, gVisor, and the trust boundary.
+
 ## 1. Run one iteration
+
+In the shell you will audit from, set variables for the commands on this
+page, naming the backend so the output path is predictable:
+
+```bash
+TARGET=samples/sample-python        # or your own target slug
+BACKEND=claude                      # or codex, gemini, grok, oss
+RESULTS="output/$TARGET/$BACKEND/results"
+LOGS="output/$TARGET/$BACKEND/logs"
+```
+
+Do not `export` them: several TokenFuzz tools read an exported `BACKEND` as a
+backend choice. Then run:
 
 ```bash
 bin/audit --target "$TARGET" --backend "$BACKEND" 1
 ```
 
-The `oss` backend has no default model: add `--model <id>` here and on every
-later audit command.
+The trailing `1` makes this a smoke test: one worker launches, whatever the
+normal pool size (3 by default; see
+[Worker pool](../reference/environment.md#worker-pool)), and claims ranked
+work for one iteration. Result and log directories stay in place for the next
+run.
 
-The trailing `1` is a smoke test:
+Add these when they apply:
 
-- one worker launches, whatever the normal pool size;
-- it claims ranked work and investigates for one iteration;
-- result and log directories stay in place for the next run.
+- `--model <id>`: required for `oss`, on this and every later audit command.
+  For a hosted backend, pass it when reproducibility matters; otherwise the
+  default model and reasoning effort come from `config/models.toml`
+  ([overrides](../reference/environment.md#model-selection)).
+- `--agent-security external-bypass`: required for `gemini` and `grok`, which
+  cannot run inside their own CLI sandbox. Run them in a container or VM you
+  administer; see [Agent security modes](../guides/backends.md#agent-security-modes).
+- `--strategy S1` (or any of `S2` through `S8`): pins that strategy and
+  suspends normal rotation, for a focused plumbing test.
 
-For a hosted backend, choose a model explicitly with `--model <name>` when
-reproducibility matters. Otherwise its default model and reasoning effort come
-from `config/models.toml`; per-shell overrides are listed under
-[Model selection](../reference/environment.md#model-selection).
+Without `--backend`, `bin/audit` uses `AUDIT_BACKEND`, or rotates every
+installed and configured hosted backend.
 
-For a focused plumbing test, add `--strategy S1` (or any of S2 through S8).
-This pins the strategy and suspends normal rotation for the run.
+### What happens before the agent starts
+
+In order, the audit:
+
+1. checks that the configured `[runner].bin` starts and reaches the audited
+   tree, when the target has a runner;
+2. sends a small model preflight and stops if the provider refuses or serves
+   a different model;
+3. builds or refreshes stale sanitizer trees, continuing with a warning if a
+   build fails;
+4. pins the reviewed config for the session.
 
 !!! warning "Do not edit the live session snapshot"
     Preflight copies the reviewed config to `$RESULTS/.target.toml` and binds
-    it to `$RESULTS/.session-env`. Every probe in that session reads the
-    pinned copy. Edit `output/$TARGET/target.toml` only between runs; never
-    edit or remove the backend-local snapshot.
+    it, with the target path and revision, in `$RESULTS/.session-env`. Every
+    probe in the session reads that copy. Edit `output/$TARGET/target.toml`
+    only between runs; never edit or remove the snapshot.
 
 ### What success looks like
 
-The startup timeline is written to `output/<target>/<backend>/logs/index.log`.
-It should identify the backend and model, the target source and revision, the
-worker pool, and the result and log roots. The result tree should contain at
-least:
+The startup timeline goes to `$LOGS/index.log`. Look for these lines:
+
+```text
+Model preflight passed: backend=<backend> model=<model>
+LLM backend: provider=<backend> model=<model>
+Target: slug=<target> path=<source path>
+Output: results=<results dir> logs=<logs dir>
+Iteration 1 starting: agents=1 ...
+Agent 1 cold-start finished rc=0 ... log=session_<stamp>_cold-start-1.log
+```
+
+The result tree should contain at least:
 
 ```text
 results/
@@ -69,9 +115,9 @@ results/
   crashes-rejected/
 ```
 
-Whether `state/hypotheses.jsonl`, `state/runs.jsonl`, or a testcase appears
-depends on how far the agent got. Their absence is a reason to inspect the
-log, not proof that directory setup failed.
+`state/hypotheses.jsonl`, `state/runs.jsonl`, and testcases appear only if the
+agent got that far. Their absence is a reason to read the log, not proof that
+setup failed. [Artifacts](../reference/artifacts.md) describes every file.
 
 Press Ctrl-C to stop a longer run. The orchestrator terminates the active
 backend process tree and leaves structured state for the next invocation.
@@ -84,7 +130,7 @@ Start with the compact state view:
 bin/state --results-dir "$RESULTS" show-recent --agent 1
 ```
 
-Then check the generated review pages:
+Then open the generated review pages:
 
 | Path | What it shows |
 | --- | --- |
@@ -92,131 +138,67 @@ Then check the generated review pages:
 | `$RESULTS/crashes/crash-clusters.html` | Confirmed crash clusters and maintainer bundles. |
 | `$RESULTS/crashes-rejected/rejected-crashes.html` | Rejected crash candidates with reasons. |
 | `$RESULTS/findings-rejected/rejected-findings.html` | Rejected findings with reasons. |
-| `output/$TARGET/finding-clusters.html` | Cross-backend finding summary. |
-| `output/$TARGET/crash-clusters.html` | Cross-backend crash summary. |
+| `output/$TARGET/finding-clusters.html` | Finding summary across backends. |
+| `output/$TARGET/crash-clusters.html` | Crash summary across backends. |
 
 An empty `findings/` or `crashes/` after one iteration is normal. A filed FIND
-is not automatically a confirmed security result either: read its Status
-column and its `validation.json`. To tell an uneventful iteration from a
-failed one, inspect in this order:
+is not automatically a confirmed security result: read its Status column and
+its `validation.json`, and see [Triage and review](../guides/triage-results.md).
 
-1. `$LOGS/index.log` for preflight or backend failures.
-2. `bin/state --results-dir "$RESULTS" show-recent --agent 1` for claims and
-   hypotheses.
-3. `$RESULTS/state/runs.jsonl` for recorded probe executions, if it exists.
+To tell an uneventful iteration from a failed one, read in this order:
+
+1. `$LOGS/index.log`, for preflight or backend failures.
+2. The `show-recent` view above, for claims and hypotheses.
+3. `$RESULTS/state/runs.jsonl`, for recorded probe executions, if it exists.
 4. The two rejected pages, for candidates that reached triage but did not
    meet the bar.
+5. The trimmed session log that `index.log` names (`$LOGS/session_*.log`), and
+   only as a last resort the raw backend transcripts under `$LOGS/.raw/`.
 
-To see what the iteration never looked at, render the coverage report:
+To see what the iteration never looked at:
 
 ```bash
 bin/state --results-dir "$RESULTS" coverage
 ```
 
-It lists every auditable file against what was offered, claimed, requested in
-a transcript, and attested read, and names the largest files no session
-reached. A clean run over a mostly unread tree is a budget statement, not a
-security result; [Review coverage](../concepts/coverage.md) explains the
-columns.
-
-Use the trimmed session log named by `index.log` only when the structured
-views do not explain the run. Raw backend transcripts under `$LOGS/.raw/` are
-the last resort.
+It compares auditable files per directory with those offered to a session,
+claimed, requested in a transcript, and verifiably examined, and lists the
+largest files never offered. A clean run over a mostly unread tree is a budget
+statement, not a security result; [Review coverage](../concepts/coverage.md)
+explains the columns.
 
 ## 3. Continue or reset
 
-Run a bounded working session:
-
 ```bash
-bin/audit --target "$TARGET" --backend "$BACKEND" 10
+bin/audit --target "$TARGET" --backend "$BACKEND" 10   # a bounded session
+bin/audit --target "$TARGET" --backend "$BACKEND"      # run until stopped
 ```
 
-Or run continuously:
+Both use the configured worker pool and normal strategy rotation, and resume
+from the structured state already in `$RESULTS`.
 
-```bash
-bin/audit --target "$TARGET" --backend "$BACKEND"
-```
-
-Multi-iteration and continuous runs use the configured worker pool and normal
-strategy rotation.
-
-To inspect cleanup before starting over:
+To see what a cleanup would remove before starting over:
 
 ```bash
 bin/cleanup_state --target "$TARGET" --backend "$BACKEND" --dry-run
 bin/cleanup_logs --target "$TARGET" --backend "$BACKEND" --dry-run
 ```
 
-Remove `--dry-run` only after checking the printed paths. Omitting
-`--backend` from `bin/cleanup_state` selects every backend and aggregate
-result under that target, and also removes generated sanitizer build trees and
-transient `.audit/` state from the target source while preserving
-`.audit/build*.sh` recipes. Use that form only for a deliberate target-wide
-reset; a backend-scoped cleanup leaves the shared source builds intact.
-
-## Auditing with UBSan, MSan, or TSan
-
-ASan is the default native sanitizer. To make another sanitizer part of the
-target's persistent execution contract:
-
-1. Add it to `[sanitizer].enabled` in `output/<target>/target.toml`.
-2. Put it first in the list, because `bin/probe` selects the first enabled
-   sanitizer by default.
-3. Set the matching `<name>_bin` and, for compiled API harnesses,
-   `<name>_lib` when generation cannot infer them.
-
-```toml
-[sanitizer]
-enabled = ["ubsan", "asan"]
-ubsan_bin = "build-ubsan/path/to/binary"
-ubsan_lib = "build-ubsan/path/to/library.a"
-```
-
-Build up front, or let audit preflight refresh stale artifacts:
-
-```bash
-bin/setup-target "$TARGET" --build
-bin/audit --target "$TARGET" --backend "$BACKEND" 1
-```
-
-For one deliberate probe without changing list order:
-
-```bash
-PROBE_SANITIZER=ubsan bin/probe "$RESULTS/scratch-1/testcase"
-```
-
-The override affects that probe only; it does not change the session snapshot
-or future runs. See [Sanitizer policy](../guides/configure-target.md#sanitizer-policy)
-for the trade-offs and the
-[target config reference](../reference/target-toml.md#sanitizers) for the
-exact fields. Go's `race` detector uses the configured language runner rather
-than a `race_bin` or `race_lib`.
-
-## Where to run the audit
-
-The recommended default is `bin/audit-container-shell`. It isolates target
-build scripts and agent tool use from most of the host filesystem while
-keeping the checkout and output in the mounted repository.
-
-```bash
-bin/audit-container-shell --rebuild   # first use
-bin/audit-container-shell             # later uses
-```
-
-The helper installs backend CLIs into a Docker image and opens a shell at
-`/root/work`; it does not start the audit. It does not mount host CLI
-credential directories. Authenticate inside the disposable shell, or pass
-`--forward-credentials` when you explicitly want supported credential
-variables forwarded.
-
-For Docker installation, gVisor, and the container trust boundary, see
-[Container runtime](prerequisites.md#container-runtime-recommended). For all
-helper flags, run `bin/audit-container-shell --help`.
+Remove `--dry-run` only after checking the printed paths. Always pass
+`--target`: without it, both commands act on every target under `output/`.
+Without `--backend`, `bin/cleanup_state` resets every backend and aggregate
+result for the target, and also removes its generated sanitizer build trees
+and transient `.audit/` state from the target source. It keeps `target.toml`,
+`.ground-truth.json`, and the `.audit/build.sh` and
+`.audit/build-<sanitizer>.sh` recipes. A backend-scoped cleanup leaves the
+shared source builds intact.
 
 ## What's next
 
 - [Triage and review](../guides/triage-results.md) explains what is ready for
   maintainer review.
+- [Sanitizer policy](../guides/configure-target.md#sanitizer-policy) explains
+  how to audit with UBSan, MSan, or TSan instead of ASan.
 - [Backends and isolation](../guides/backends.md) covers hosted rotation and
   local models.
 - [Audit lifecycle](../concepts/audit-lifecycle.md) connects setup, agents,

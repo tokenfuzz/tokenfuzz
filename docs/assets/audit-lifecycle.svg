@@ -45,7 +45,7 @@
   <text x="40" y="146" class="step-num">2</text>
   <g filter="url(#al-shadow)"><rect x="70" y="112" width="850" height="64" class="step"/></g>
   <text x="90"  y="136" class="title">Run the audit</text>
-  <text x="90"  y="158" class="sub">Preflight converges the build, pins revision and config, creates results, then launches the selected backend.</text>
+  <text x="90"  y="158" class="sub">Records the revision and creates results; preflight converges the build and pins config, then launches.</text>
   <text x="90"  y="172" class="micro">Claims, runs, notes, and events append; cards and current hypotheses update atomically.</text>
 
   <path d="M480,176 L480,206" class="arrow" marker-end="url(#al-arrow)"/>

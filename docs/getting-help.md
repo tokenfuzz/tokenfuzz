@@ -14,7 +14,7 @@ problem, use the reporting guidance below. The
 | Suggest a feature or investigation strategy | Open an issue describing the proposed change and who it helps. Read [Development](development.md) before opening a PR. |
 | Report a security issue **in TokenFuzz** | [SECURITY.md](https://github.com/tokenfuzz/tokenfuzz/blob/main/SECURITY.md). Do **not** open a public issue. |
 | Report a security issue **TokenFuzz found in another project** | The upstream project's normal security-disclosure process, not this repository. |
-| Share accepted impact from a TokenFuzz run | Follow the upstream disclosure process first. Once details are public, attribution in the upstream advisory, issue, or acknowledgement is enough. |
+| Credit TokenFuzz for a result | Wait until upstream disclosure is complete. Then "Found using TokenFuzz" in the upstream advisory, issue, or acknowledgement is enough, and helps maintainers see how the harness is used. Never share embargoed details here. |
 
 ## Before filing a support issue
 
@@ -111,11 +111,4 @@ audited target belongs with that target's security team or documented
 disclosure contact.
 
 There is no private support channel. For a question that involves private
-target details, reduce it to a sanitized reproducer before filing publicly.
-
-## Helping the project
-
-After coordinated disclosure is complete, a public acknowledgement helps
-maintainers understand how TokenFuzz is being used. "Found using TokenFuzz"
-in an upstream advisory, issue, or acknowledgement is enough. Do not share
-embargoed details here.
+target details, reduce it to a sanitised reproducer before filing publicly.

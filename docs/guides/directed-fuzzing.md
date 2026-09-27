@@ -1,307 +1,403 @@
 # Boundary-directed fuzzing
 
-Strategy S4 is the only TokenFuzz strategy that runs a fuzzer. Use it when a
-published API accepts a shape the threat model exposes and no existing
-harness drives that API. Use S7 for hand-written parser or decoder boundary
-inputs; S7 may use a minimal deterministic public-API driver to deliver one,
-but never builds a fuzz harness or runs a campaign.
+Strategy S4 is the only TokenFuzz strategy that runs a fuzzer. It finds a
+published API that takes input the threat model's attacker controls and that
+no existing harness drives, builds or improves a libFuzzer harness for it,
+and spends one bounded campaign on it. Hand-written parser or decoder inputs
+belong to S7, which may use a minimal deterministic driver to deliver one but
+never builds a fuzz harness or runs a campaign.
 
-The agent-facing playbook is
-`.agents/references/strategies/S4-directed-fuzzing.md`. This page is for
-operators: what S4 will and will not do to your checkout, and how to give it
-coverage feedback.
+This page is for operators deciding whether to let S4 run and how to steer
+it, and for anyone running `bin/fuzz` by hand. The agent-facing playbook is
+`.agents/references/strategies/S4-directed-fuzzing.md`; the
+[Strategy model](../concepts/strategy-model.md) places S4 among the other
+strategies.
+
+## When S4 runs
+
+There is no separate switch. The queue carries one S4 campaign card per
+target whenever the target enables a native sanitizer (`asan`, `ubsan`,
+`msan`, or `tsan`) and configures that sanitizer's library, such as
+`asan_lib`, in [`target.toml`](../reference/target-toml.md). A delta run
+(`bin/audit --since`) and a run pinned to another strategy carry no campaign
+card.
+
+- **Who runs it.** With more than one agent, the harness gives the S4 lane
+  to the highest-numbered reproduce agent while the campaign card is
+  claimable; like any lane, it can later be rotated away after dry
+  iterations. With a single agent, S4 is reached through
+  [strategy rotation](../concepts/strategy-model.md#strategy-rotation) or a
+  pin.
+- **Pinning.** `bin/audit --strategy S4` runs a queue holding only the
+  campaign card. On a findings-only or CLI-only target it stops with
+  `LANE_UNAVAILABLE: S4 requires a native sanitizer library; use S7 for this
+  findings-only or CLI-only target` in `index.log`.
+- **How long.** One campaign per iteration, five minutes by default (see
+  [Bounded on purpose](#bounded-on-purpose)). The agent then records the
+  result and goes back to the queue.
+- **What it can build.** `template`, `build`, and `run` handle C and C++
+  harnesses only. `inventory` also recognises cargo-fuzz, Go, Atheris, and
+  Jazzer harnesses, so it can report what they drive.
+
+You steer S4 through the target's configuration, not through S4 settings:
+the threat model decides what is admitted, a coverage sibling build decides
+whether the campaign is guided, and seed inputs decide where it starts.
 
 ## The workflow
 
 ```bash
 export RESULTS_DIR=output/<slug>/<backend>/results
 
-bin/fuzz inventory        # what the target already ships
-bin/fuzz candidates       # what earns a new harness
-bin/fuzz template <sym>   # skeleton in $RESULTS_DIR/fuzz/src/
-bin/fuzz build            # out-of-tree compile
-bin/fuzz run              # one bounded campaign
+bin/fuzz inventory          # harnesses the target already ships, and their gaps
+bin/fuzz candidates         # APIs that earn a new harness, ranked
+bin/fuzz template <symbol>  # skeleton in $RESULTS_DIR/fuzz/src/
+bin/fuzz build              # out-of-tree compile of every harness in fuzz/src/
+bin/fuzz run                # one bounded campaign
+bin/fuzz status             # what each harness did, and what to do next
+bin/fuzz doctor             # prove the shared build is unaffected
 ```
 
-The command reads the active session from `RESULTS_DIR`. During an audit that
-variable is already set for the agent; an operator invoking `bin/fuzz`
-directly must export it as above or pass `--results-dir`. Everything lands
-under `$RESULTS_DIR/fuzz/`:
+`bin/fuzz` finds the session from `--results-dir`, else `RESULTS_DIR`, else
+by walking up from the current directory. During an audit the variable is
+already set. By hand, it needs a results tree that an earlier
+`bin/audit --target <slug>` created; otherwise it exits with
+`no output/<slug>/<backend>/results/.session-env above …`. The global
+options `--results-dir`, `--sanitizer` (default: the target's first enabled
+native sanitizer), and `--json` go before the subcommand:
 
-| Path | Contents |
-| --- | --- |
-| `fuzz/src/` | Harness sources. Never in the target checkout. |
-| `fuzz/bin/` | Built fuzzers, compiler logs, and source-bound build/contract manifests. |
-| `fuzz/corpus/<harness>/` | The corpus, which survives across campaigns. |
-| `fuzz/artifacts/<harness>/` | libFuzzer's crash/OOM/timeout artifacts. |
-| `fuzz/logs/<harness>/` | One log per slice. |
-| `fuzz/campaign.jsonl` | Every slice's verdict and measurements. |
-| `fuzz/state.json` | Per-harness history and quarantine state. |
+```bash
+bin/fuzz --results-dir output/<slug>/<backend>/results status
+```
+
+Full syntax is in the [command reference](../reference/commands.md).
+Everything a campaign writes (harness sources, built fuzzers and their
+manifests, corpora, libFuzzer artifacts, slice logs, and campaign state)
+stays under `$RESULTS_DIR/fuzz/`, laid out in
+[Artifacts](../reference/artifacts.md#fuzzing-campaign). The one exception is
+a replay: the artifact and a copy of its harness source go to
+`$RESULTS_DIR/scratch-<agent>/` for `bin/probe`.
 
 ## Three structural checks admit a candidate
 
-`bin/fuzz candidates` admits a symbol when all three checks hold. These checks
-establish structural fit, not that the audited product routes untrusted input
-to the symbol. Review the reported declaration and trace a product input route
-before writing a new harness:
+`bin/fuzz candidates` runs every exported symbol that a public header
+declares through three checks and admits it only when all three hold. They
+establish structural fit, not that the product routes untrusted input to
+the symbol:
 
-1. **Published**: present in the exported symbol table of `<san>_lib` or a
-   configured linked library, and not a reserved (`_`-prefixed) identifier.
-   The second half matters for a static archive: an archive has no export
-   list, so `nm` reports every cross-file helper as global.
-2. **Input-shape compatible**: its declaration in a public header carries a
-   parameter shape the target's `[threat_model].attacker_controls` can supply.
-   `bytes` reaches a buffer+length, a string, or a stream; `fs-state` reaches
-   a path; `call-sequence` reaches an opaque handle.
-3. **Uncovered**: no harness in the tree has an identifiable call to it.
+1. **Published.** The symbol is exported by `<san>_lib` or a library
+   configured beside it (`link_libs`), and its declared name does not start
+   with an underscore (in a static archive every cross-file helper looks
+   global, and C reserves `_` names for the implementation).
+2. **Input-shape compatible.** Its declaration has a parameter shape the
+   target's `[threat_model].attacker_controls` can supply. Headers come from
+   the configured `includes`, or from the whole source tree when none are
+   configured.
 
-Rejections are reported with their reason, so an empty result is diagnostic:
+    | `attacker_controls` token | Parameter shapes it admits |
+    | --- | --- |
+    | `bytes` | buffer and length, NUL-terminated string, stream handle |
+    | `protocol-state` | buffer and length, stream handle |
+    | `fs-state` | filesystem path, stream handle |
+    | `call-sequence`, `call-order` | opaque state handle |
+    | `timing`, `race`, `env` | nothing |
+
+3. **Uncovered.** No harness in the target tree, and none this session
+   already wrote, has an identifiable call to it. A covered symbol is
+   reported as work for the existing harness instead.
+
+Admitted symbols are ranked by how many controls reach them, their strongest
+shape, whether the name carries an input-consuming verb (`parse`, `read`,
+`decode`, …), and whether the call graph knows an entry route to them. The
+call graph only ranks; a missing route never keeps a candidate out, because
+a syntactic graph cannot see indirect dispatch.
 
 ```console
 $ bin/fuzz candidates
-2 admitted of 5 declared exported symbols in vulnlib (attacker_controls: bytes, call-sequence)
+1 admitted of 4 declared exported symbols in sampleproj (attacker_controls: bytes, call-sequence)
 
 Admission checks the declaration's input shape, not product reachability. Trace a product input route to the selected API before building a harness.
 
-  vl_parse
-    int vl_parse(struct vl_ctx *c, const unsigned char *data, size_t len);
+  app_parse
+    int app_parse(struct app_ctx *ctx, const unsigned char *data, size_t len);
     shape compatible with: bytes, call-sequence via buffer+length, opaque state handle
 ```
 
-Widening `attacker_controls` in `target.toml` widens what is admitted, which
-is the point. A target whose threat model is `bytes` should not get a harness
-that fuzzes filenames.
+When nothing is admitted, the command lists symbols (up to `--limit`,
+default 25) with the first reason each failed, so an empty result is
+diagnostic; `--json` always includes rejected symbols with every reason. It
+exits with status 3 when it can read no exported symbols at all, which
+usually means the library is not built.
 
+Widening `attacker_controls` in `target.toml` widens what is admitted, which
+is the point: a target whose threat model is `bytes` should not get a
+harness that fuzzes filenames.
+
+Before writing a harness, trace a product input route to the chosen symbol.
 For a vendored API, an exported header and the function's own definition do
-not establish a product route. If no product caller or documented entry can
-be traced to the chosen symbol, select another candidate and retain the lead
-for source review.
+not establish one. If no product caller or documented entry leads to it,
+pick another candidate and keep the lead for source review.
 
 ## Ground the harness in local callers
 
-`bin/fuzz template <symbol>` searches only the target's local tests, examples,
-samples, and existing fuzz sources for the exact symbol, and records at most
-two source locations in the generated `S4-RECEIPT`. Read those callers before
-writing setup code. They commonly reveal constructors, related length and
-capacity arguments, ownership transfer, and teardown that a declaration
-cannot express.
+`bin/fuzz template <symbol>` refuses a symbol the checks did not admit
+(`--force` overrides) and writes `fuzz_<symbol>.c`, or `.cc` for a C++
+target, under `fuzz/src/`. It looks for an exact call to the symbol in the
+target's own fuzz sources, examples, samples, and tests, in that order, and
+records up to two in the harness's `S4-RECEIPT` comment block. Those callers
+usually show the constructors, related length and capacity arguments,
+ownership, and teardown that a declaration cannot express. They are
+construction evidence, not proof of reachability: test code may do trusted
+setup an attacker cannot. With no caller found, the receipt says
+`UNRESOLVED`.
 
-The caller is construction evidence, not proof of product reachability. Test
-code may perform trusted setup unavailable to an attacker. When no example
-exists, the template records `UNRESOLVED`; verify product ingress before
-building from the public declaration.
+The harness author fills the receipt's `INPUT-BUFFER`, `CONSTRUCTOR`,
+`ARG-RELATIONS`, `RESOURCE-FLOW`, and `TEARDOWN` fields with source-anchored
+facts. `INPUT-BUFFER` matters most: libFuzzer hands over an exact-size
+buffer, so if every real caller adds padding or a terminator, the harness
+must too (the template's `FZ_INPUT_PADDING`), or a read into that padding
+becomes a crash no caller can cause.
 
-Fill the receipt's `INPUT-BUFFER`, `CONSTRUCTOR`, `ARG-RELATIONS`,
-`RESOURCE-FLOW`, and `TEARDOWN` fields with source-anchored facts.
-`INPUT-BUFFER` quotes how the caller allocates the bytes it passes (trailing
-padding, terminator, alignment, minimum size); the harness reproduces it,
-because libFuzzer hands over an exact-size buffer and a read into padding
-every real caller supplies is a crash no caller can cause. The template's
-`FZ_INPUT_PADDING` sets that padding. `bin/fuzz build` stores the fields in
-the binary manifest beside the exact harness digest, coverage guidance, and
-sanitizer status. A field still reading `UNRESOLVED` lists itself as
-unresolved, so an answered field cannot be contradicted by a stale summary
-line. `bin/fuzz status` then joins that manifest with the campaign's
-first-slice result, so a resumed agent sees whether to repair setup, resolve
-a contract, seed the corpus, or continue. Receipt text never admits a target,
-changes scheduling, or counts as a finding.
+`bin/fuzz build` binds the receipt to the exact harness source, and
+`bin/fuzz status` shows which fields are still unresolved. Receipt text
+never admits a target, changes scheduling, or counts as a finding.
 
 ## Real targets, not fake ones
 
 `bin/fuzz build` refuses three shapes that reach the target as no caller
-could: casting fuzzer bytes into a typed object, including a private header,
-or hand-declaring a symbol. Each refusal names the repair. A crash found
-through any of those is a crash in the harness's fiction, and triaging one
-costs a reviewer a session.
+could, and names the repair for each:
 
-These checks detect particular harness mistakes. Passing them does not prove
-that setup is valid or that every call follows the public API contract; the
-reviewer still needs to read the harness.
+- casting the fuzzer's buffer into a typed object (`(struct ctx *)data`);
+- including a quoted header by a `../` path, from an `internal`,
+  `private`, or `impl` directory, or named `*_internal.h`, `*_private.h`,
+  or `*_impl.h`;
+- hand-declaring a target function with an `extern` prototype instead of
+  including its header.
 
-Every artifact a campaign produces is replayed with
-`bin/probe --confirm --harness <harness>`, so a fuzz crash is coverage-gated,
-confirmed across five runs, deduplicated, gated, and bundled exactly like a
-hand-written one. The generated harness template carries a standalone `main`
-under `#ifndef FUZZ_CAMPAIGN_BUILD` to make that replay possible; keep it.
+A crash through any of these is a crash in the harness's fiction. Passing
+the checks does not prove the setup valid; a reviewer still reads the
+harness.
+
+No fuzz artifact is filed directly. Each is copied into scratch beside its
+harness source and replayed with `bin/probe --confirm --harness <harness>`
+under the campaign's sanitizer. From there it is an ordinary testcase:
+confirmed across five runs, deduplicated, gated, and bundled like a
+hand-written one. A `timeout-` artifact is probed once first and confirmed
+only if that run crashes. The replay compiles the harness's standalone
+`main` (the template's `#ifndef FUZZ_CAMPAIGN_BUILD` branch), so keep both
+entry points working.
 
 ## Build isolation, and why it matters across backends
 
-**Nothing S4 does writes to the target checkout or to `build-<san>/`.**
+**Nothing a campaign writes lands in the target's source tree or in
+`build-<san>/`.** That is what lets a `claude` run and a `codex` run audit
+the same checkout at once. One stray harness file in the checkout would:
 
-That is a hard requirement, and it is what lets a `claude` run and a `codex`
-run audit the same checkout at once:
+- change the checkout's source signature, because build freshness counts
+  untracked files (git-ignored files excepted);
+- make the shared `build-<san>/` read as stale for every backend on that
+  checkout;
+- stall their runs for up to 15 minutes waiting for an exclusive build lease
+  that no live peer will yield;
+- get the divergent run refused by the source pin, because two runs reading
+  one checkout at different source states are not comparable.
 
-- Build freshness is derived from the checkout's VCS state **including
-  untracked paths**. A harness file left in the tree changes the source
-  signature.
-- A changed signature makes the shared `build-<san>/` read as stale for
-  *every backend on that checkout*.
-- The rebuild that follows needs the exclusive build lease, which no live
-  peer will yield, so runs stall for up to the lease wait (15 minutes).
-- The source pin then refuses the divergent run outright, because two runs
-  reading one checkout at different source states are not comparable.
+So `bin/fuzz build` refuses a source inside the checkout (copy a harness the
+project ships into `fuzz/src/` to improve it); `build` and `run` hold only a
+*shared* lease on the tree they link; and `bin/fuzz run` warns if the
+checkout's source signature changed during the campaign.
 
-One stray harness file can therefore stall a whole concurrent benchmark cell.
-`bin/fuzz build` refuses an in-tree source for that reason, a campaign holds
-only a *shared* build lease, and `bin/fuzz run` compares the checkout's source
-signature before and after and warns loudly if anything changed.
+`bin/fuzz doctor` checks the contract on demand (paths shortened):
 
 ```console
 $ bin/fuzz doctor
-target root:    targets/vulnlib/src
-linked build:   targets/vulnlib/src/build-asan+fuzz
+target root:    targets/sampleproj
+linked build:   targets/sampleproj/build-asan+fuzz
+library:        targets/sampleproj/build-asan+fuzz/libsampleproj.a
 feedback:       guided (SanitizerCoverage present)
-campaign root:  output/vulnlib/claude/results/fuzz
-build lease:    targets/vulnlib/src/.audit/build-locks/build-asan+fuzz.lock
+campaign root:  output/sampleproj/claude/results/fuzz
+build lease:    targets/sampleproj/.audit/build-locks/build-asan+fuzz.lock
 writer pending: False
 other readers:  False
 isolation:      OK — every campaign artifact is outside the checkout
 ```
 
+It exits non-zero with a `PROBLEM:` line when a harness in the checkout is
+not tracked by the VCS, or when the results tree sits inside the checkout.
+When the build is blind, it also prints the rebuild recipe below.
+
 ## Giving it coverage feedback
 
-libFuzzer needs SanitizerCoverage counters *inside a linked target library* to
-guide mutations through target code. An ordinary `build-<san>/` usually has
-none, so a fuzzer linked against one is **blind to target internals**. It may
-still find shallow faults, and totals can move because the harness
-translation unit has its own counters. Changes in those totals alone do not
-prove the target library is providing guidance. A guided status means at least
-one linked library has counters; inspect the build if the API under test lives
-in a different, uninstrumented library.
+libFuzzer guides mutations through target code only when a linked target
+library carries SanitizerCoverage counters. An ordinary `build-<san>/`
+usually has none, so a fuzzer linked against it is **blind to target
+internals**: it may still find shallow faults, and its totals can move on
+the harness's own counters, but that does not mean the target is guiding
+anything. `guided` status means at least one linked library has counters;
+check the build if the API under test lives in a different library.
 
-The shared tree is never rebuilt for that. When ASan is available,
-`bin/setup-target <target> --build` and audit preflight automatically build
-the **siblings** `build-asan+fuzz` and `build-asan+cov`. The target's own
-`.audit/build.sh` is rerun with `CC`/`CXX` pointed at isolated toolchain
-shims. The fuzz shim adds `-fsanitize=fuzzer-no-link`; the replay shim adds
-`-fsanitize-coverage=trace-pc-guard`. Their directories lead `PATH` and answer
-to `cc`, `gcc`, `clang`, and their `++` forms, so a recipe that hardcodes a
-compiler name still gets instrumented. Each sibling is verified and stamped
-like the primary, so it is rebuilt when the source or recipe changes.
+The shared tree is never rebuilt for this. When a target enables ASan,
+`bin/setup-target <slug> --build` and audit preflight (for targets under
+`targets/`) build two **siblings** beside `build-asan/`:
 
-A recipe that hardcodes an absolute compiler path yields no instrumentation.
-Setup then reports the sibling unavailable with its own
-`build-materialize-asan+fuzz.log` or `build-materialize-asan+cov.log` under
-`.audit/`, and remembers that until the source, recipe, or toolchain changes
-(or `--build --force`). Other sanitizers do not receive automatic
-instrumentation siblings.
+- `build-asan+fuzz`, compiled with `-fsanitize=fuzzer-no-link`, which
+  `bin/fuzz` links harnesses against;
+- `build-asan+cov`, compiled with `-fsanitize-coverage=trace-pc-guard`, in
+  which `bin/hits --mode generic` replays testcases to report the coverage a
+  probe reached (see [the audit lifecycle](../concepts/audit-lifecycle.md)).
+  They cannot be one tree: libFuzzer refuses to start when any loaded object
+  carries `trace-pc-guard`.
 
-To build one by hand instead, for example against a different toolchain:
+Each sibling needs `asan_lib` (the coverage sibling also accepts `asan_bin`)
+to point inside `build-asan/`. It reruns the target's own `.audit/build.sh`
+with `CC` and `CXX`, and `cc`, `gcc`, `clang`, `c++`, `g++`, and `clang++`
+on `PATH`, pointed at shims that add the flag and hand off to an LLVM clang
+that ships libFuzzer. A sibling is built only beside a fresh primary build,
+is verified and stamped like it, and is rebuilt when the source or recipe
+changes. Other sanitizers get no automatic siblings.
+
+A sibling cannot stale anything: `build-<san>+…` is excluded from the
+freshness walk, and its build lease is separate from `build-<san>/`'s. One
+stamped from different source than the primary build is not linked;
+`bin/fuzz` falls back to the plain build, and `build` and `doctor` say why.
+A hand-built sibling with no stamp is used as offered.
+
+A recipe that calls a compiler by absolute path gets no instrumentation.
+Setup then reports the sibling unavailable, with its log at
+`.audit/build-materialize-asan+fuzz.log` (or `…asan+cov.log`), and does not
+retry until the source, recipe, or toolchain changes, or you run
+`bin/setup-target <slug> --build --force`.
+
+To build the fuzz sibling by hand, for example with a different toolchain,
+put the library at the same path relative to the tree as `asan_lib` has
+under `build-asan/`; `bin/fuzz` finds it by swapping the directory name. For
+a CMake target:
 
 ```bash
-# However this target normally builds, with coverage added, a different output
-# directory, and the compiler that links the harnesses. For a cmake target:
-cmake -S targets/<slug>/src -B targets/<slug>/src/build-asan+fuzz \
+cmake -S targets/<slug> -B targets/<slug>/build-asan+fuzz \
   -DCMAKE_C_COMPILER=/path/to/llvm/bin/clang \
   -DCMAKE_CXX_COMPILER=/path/to/llvm/bin/clang++ \
   -DCMAKE_C_FLAGS="-fsanitize=address,fuzzer-no-link -g -O1" \
   -DCMAKE_CXX_FLAGS="-fsanitize=address,fuzzer-no-link -g -O1"
-cmake --build targets/<slug>/src/build-asan+fuzz
+cmake --build targets/<slug>/build-asan+fuzz
 ```
 
-Current libFuzzer rejects target objects carrying `trace-pc-guard` before it
-reads a seed. Keeping those hooks in `build-asan+cov` lets
-`bin/hits --mode generic` dump `.sancov` coverage, while `build-asan+fuzz`
-keeps the inline counters libFuzzer guides on (see the coverage gate in
-[the audit lifecycle](../concepts/audit-lifecycle.md)).
-
-Use that compiler and not the target's usual one; `bin/fuzz build` prints its
-exact path when it needs it. A sanitizer runtime is version-locked to the
-code it instrumented, and only one runtime can own a process, so a library
-built by a different toolchain either fails the harness link outright or
-forces the harness to give up its own instrumentation. libFuzzer ships only
-with a full LLVM, so on a machine whose targets are built by the platform
-compiler the two differ by default.
+Use the LLVM compiler, not the target's usual one; `bin/fuzz build` and
+`bin/fuzz doctor` print its exact path in their rebuild recipe. A sanitizer
+runtime is version-locked to the code it instrumented, and only one runtime
+can own a process. libFuzzer ships only with a full LLVM (the macOS Command
+Line Tools clang has none), so where targets are built by the platform
+compiler the two toolchains differ by default.
 
 ## When the toolchains differ anyway
 
-`bin/fuzz build` links every harness with the sanitizer, then runs the binary
-once with `-help=1`: enough to load the libraries and start the runtime, and
-not enough to execute an input. A binary that cannot start is a build error
-carrying the runtime's own message, rather than a campaign slice reported as
-`dead`.
+`bin/fuzz build` starts each linked binary once with `-help=1`, so a binary
+that cannot start is a build error with the runtime's own message, not a
+`dead` slice. A version-lock link failure (`__asan_version_mismatch_check…`)
+names the toolchain to rebuild the library with.
 
-One failure has a fallback: when the library brings its own runtime and
-refuses to share the process ("Interceptors are not working"), the harness is
-relinked without the sanitizer, which leaves one runtime and a target that is
-still fully instrumented. What it loses is the redzones around the
-*harness's* own stack and globals, so a target overrunning a buffer its
-caller owns goes unreported. `bin/fuzz build` says so and prints the rebuild
-recipe above; the binary's manifest records `sanitized: false`.
+When the library brings its own runtime and refuses to share the process
+("Interceptors are not working"), the harness is relinked without the
+sanitizer. The target stays instrumented, but the harness's own stack and
+globals lose their redzones, so a target overrunning a buffer its caller
+owns goes unreported. The build says so, the manifest records
+`sanitized: false`, and `bin/fuzz status` shows `target-only sanitizer`.
 
-`bin/fuzz` finds `build-<san>+fuzz` automatically and links against it. A
-sibling is safe for the same two reasons the plain tree is not: the
-`build-<san>+…` name is already pruned from the source walk that decides
-build freshness, so it cannot stale anything, and the build lease keys on the
-directory name, so building or reading it never contends with `build-<san>/`.
-A sibling whose stamp no longer matches the primary build is treated as stale
-and not linked; the campaign says so and falls back.
+A built binary is reused until its source, compiler, sanitizer, linked
+libraries, include paths, defines, or `LDFLAGS` change.
 
 ## Bounded on purpose
 
 S4 shares an audit iteration with seven other strategies, so a campaign is a
-turn rather than a shift:
+turn, not a shift:
 
-- The default budget is five minutes; `--budget-seconds` changes it.
-- The budget covers the **whole** campaign (slices, artifact replays, and
-  corpus merges), not just the fuzzing. A slice that cannot finish inside the
-  remaining budget is never started, and a budget shorter than one slice
-  shrinks the slice rather than overrunning.
-- Only one campaign runs per results tree at a time. A second agent assigned
-  S4 finds the lock held and returns its wall to the other strategies rather
-  than queueing.
-- S4 owns exactly one work card per target, so it cannot crowd the queue the
-  way a per-file strategy does.
-- The campaign ends early when every harness is quarantined, and reports how
-  much of the budget it handed back.
+- The default budget is 300 seconds (`--budget-seconds`), in slices of 60
+  seconds (`--slice-seconds`).
+- The budget covers the **whole** campaign: first replaying artifacts left
+  from an earlier campaign, then slices, new replays, and corpus merges. A
+  quarter of the budget, between 10 and 45 seconds, is held back for
+  replays. The last slice shrinks to fit, and the campaign stops once less
+  than 10 seconds of slice would be left.
+- Only one campaign runs per results tree at a time. A second agent
+  assigned S4 logs "another agent is already running the campaign for this
+  target; leaving the wall to it" and returns its wall to other strategies.
+- S4 owns exactly one work card per target, so it cannot crowd the queue.
+- The campaign ends early when every harness is quarantined, and reports
+  how much budget it handed back.
 
-A harness is quarantined, and the budget moves to another, as soon as it
-stops paying:
+After each slice the harness gets a verdict. `productive` (new edges, enough
+feature growth, or a crash that is not yet a repeat) and `dry` keep it in
+rotation. These quarantine it, and the budget moves to another harness:
 
-| Verdict | Meaning |
-| --- | --- |
-| `saturated` | No new target coverage for three slices: no new edge, and features grew by 2% or less of the harness's high-water mark in total across those slices. Steady growth that adds up past 2% counts as progress and restarts the count. An unguided harness's own edges never count. Revived automatically when its corpus grows. |
-| `blocked-on-crash` | Crashing with no new coverage; libFuzzer stops at its first crash, so it cannot get past a filed bug. |
-| `dead` | No meaningful executions, usually because the library failed to load. |
-| `startup-crash` | Crashed before the initial corpus finished loading. If the crashing input is one of the seeds, that seed is removed and the campaign continues; otherwise the harness setup is broken. |
-| `noise-flood` | Two slices running that ended in OOM/timeout/leak and reached no new coverage; those artifacts are auto-rejected downstream anyway. |
+| Verdict | Meaning | Returns |
+| --- | --- | --- |
+| `saturated` | No new target coverage for three slices: no new edge, and total feature growth across them of 2% or less of the harness's high-water mark. An unguided harness's own edges never count. | Automatically, when its corpus grows. |
+| `blocked-on-crash` | Crashed with no new coverage for two slices running. libFuzzer stops at its first crash, so the harness cannot get past a bug already filed. | Automatically, when its corpus grows. |
+| `dead` | Two or fewer executions and never reached libFuzzer's `INITED`. The verdict quotes the binary's first output line, or points you to the build log. | After you fix the harness or build. |
+| `startup-crash` | Crashed while loading the initial corpus. A crashing seed is removed, the slice counts as productive, and the artifact is replayed. Otherwise read the artifact's replay verdict before editing: it tells faulty harness setup from an input that already reproduces a bug. | After you fix the harness. |
+| `noise-flood` | Two slices running ended in an out-of-memory, timeout, or leak report with no new coverage. The crash gate accepts none of these. | After you bound or free the harness's allocations. |
 
-Slices are allocated by measured new coverage per second with a UCB1
-exploration term, so every harness runs before any runs twice, and a quiet
-one is revisited rather than written off. Corpora persist and are
-periodically minimised, which is what makes many short slices as good as one
-long run.
+Adding inputs to a quarantined harness's `fuzz/corpus/<harness>/` is
+therefore how you put a saturated or blocked harness back in rotation.
 
-An empty corpus is seeded automatically from the target's own test data
-before the first slice. Point
-[`FUZZ_SEED_CORPUS_DIR`](../reference/environment.md#directed-fuzzing) at a
-locally staged OSS-Fuzz or ClusterFuzz corpus to seed from it too; the
-harness never fetches one over the network. A corpus the fuzzer has already
-built is left alone, and the project's own `.dict` is attached when one
-matches the harness name.
+Slices go to the harness with the best new coverage per second, plus an
+exploration term, so every harness runs before any runs twice. Corpora
+persist and are minimised with a libFuzzer merge every eight slices of a
+harness when the budget allows. Rebuilding a harness resets its campaign
+history but keeps its corpus. Progress counts libFuzzer's `ft` as well as
+`cov`, because value profiling, switched on once a harness goes dry, reports
+through `ft` alone.
 
-Progress counts libFuzzer's `ft` as well as `cov`. Value profiling, switched
-on once a harness goes dry (which is when a magic-byte comparison is the
-likely wall), reports through `ft` alone, so a campaign watching edges only
-would call the harness mined out exactly when it started making progress.
+### Seeds
 
-The first slice is retained separately from later high-water totals:
-execution count, edge/feature deltas, artifacts, verdict, reason, and log
-path survive resume. For a guided harness with a resolved receipt that later
-saturates, `bin/fuzz status` recommends at most one contract-preserving
-derivative: one caller-controlled argument change or one source-grounded
-public call, built for the next iteration's campaign rather than as a second
-campaign in this one. This is guidance in the status output, not a
-scheduler-enforced limit. On that row it also lists up to three **compatible
-APIs**: admitted public calls whose declaration shares a struct or handle
-type with the boundary, in reading order for the one call the derivative may
-add. They are hints, never cards.
+An empty corpus is seeded before the first slice from small files (at most
+256, each at most 64 KiB, source and build files skipped) in the target's
+`seeds`, `seed_corpus`, `corpus`, `testdata`, `test-data`, `fuzz`,
+`fuzzing`, `test`, `tests`, `testsuite`, and `examples` directories. A
+corpus the fuzzer has already built is never re-seeded. To add more:
 
-Blind harnesses, unresolved receipts, and harnesses with no receipt at all
-keep the generic widen-or-re-seed advice. A failed derivative never closes or
-quarantines its parent.
+- point [`FUZZ_SEED_CORPUS_DIR`](../reference/environment.md#directed-fuzzing)
+  at a locally staged OSS-Fuzz or ClusterFuzz corpus (nothing is fetched
+  over the network);
+- run `bin/find-seed <file>[:<function>]` to list in-tree inputs likely to
+  reach a function, and copy them into the harness's corpus directory.
+
+The project's own `.dict` file is passed to libFuzzer when its name matches
+the harness, or when the target ships exactly one.
+
+## Reading `bin/fuzz status`
+
+`bin/fuzz status` joins each harness's build manifest and receipt with its
+campaign state and ends every row with a `next:` recommendation: rebuild a
+binary whose source changed, run a first campaign, or act on the last
+verdict. It keeps the first slice (executions, edge and feature deltas,
+artifacts, verdict, and log path) apart from later totals, because that is
+the quickest check that a new harness really executed and that guidance
+moved.
+
+When a guided harness saturates, `next` first asks for any unresolved
+receipt fields, then suggests at most one contract-preserving derivative
+harness for the next iteration (one caller-controlled argument change or
+one source-grounded public call), with up to three admitted **compatible
+APIs** that share a non-generic parameter type, typically a struct or
+handle, with the boundary. These are
+hints, not scheduler rules; a derivative has its own campaign state, so its
+failure never quarantines the parent. Blind harnesses and harnesses with no
+receipt get generic widen-or-re-seed advice.
+
+## Artifacts a campaign did not replay
+
+A campaign that runs out of budget leaves the rest of its artifacts in
+`fuzz/artifacts/<harness>/`, and the next campaign replays them before any
+new slice. Between iterations the audit also rewrites `fuzz-leads.md` in the
+results tree (`bin/triage-fuzz-crashes <results_dir> [max_leads]` by hand),
+listing the newest unreplayed `crash-`, `oom-`, and `timeout-` artifacts, 20
+by default. While that index holds a lead and no other agent holds the S4
+card, an otherwise idle agent slot is launched to replay it.
+
+## What the coverage numbers mean
 
 Coverage totals are counts, not a percentage of the target reviewed.
-libFuzzer's counters span loaded modules, including the harness itself. They
-do not establish how much code is reachable from an entry point or how much
-of that code has been adequately tested.
+libFuzzer's instrumented-counter total spans every loaded module, including
+the harness, so `bin/fuzz status` shows it as context ("1961 edges of 84213
+instrumented"), never as a fraction. It does not say how much code is
+reachable from an entry point or how well that code has been tested.

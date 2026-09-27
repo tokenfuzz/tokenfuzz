@@ -4,13 +4,13 @@
 
 TokenFuzz separates three responsibilities: agents propose and investigate
 claims, the probe records what executed, and triage reviews the saved
-evidence. Structured state connects those steps so a run can continue after
+evidence. Structured state connects those steps, so a run can continue after
 an agent exits or loses context.
 
 The directory boundary is simple: upstream source and builds live under
 `targets/`; audit evidence, progress, and logs live under `output/`. This
-page explains the components. For the sequence of a run, see
-[Audit lifecycle](audit-lifecycle.md).
+page explains each component and where its responsibility ends. For the
+sequence of a run, see [Audit lifecycle](audit-lifecycle.md).
 
 ## Directory model
 
@@ -23,69 +23,92 @@ repo root/
 ```
 
 Audit evidence never goes into the target source tree. Build commands may
-write build artifacts there, and the automatic builder stores reusable
-recipes, logs, and its bootstrap virtualenv under `targets/<target>/.audit/`.
-That directory is the harness's workspace, never auditable source: the source
-walk skips it, along with VCS metadata, runtime caches, sanitizer build trees,
-and any directory Python marks as a virtualenv.
+write build artifacts there, and the builder keeps its recipes, logs, and
+bootstrap virtualenv under `targets/<target>/.audit/`. That directory is the
+harness's workspace, never auditable source: the source walk skips it, along
+with VCS metadata, runtime caches, sanitizer build trees, and virtualenvs.
 
 ## The audit run
 
-`bin/audit` owns session setup and supervision. On startup it reads
-`target.toml`, detects the source revision, converges the required build and
-execution routes, creates the result and log directories, and writes a
-results-local configuration snapshot. That snapshot is immutable for the run,
-so live agents cannot silently change the runner, build, or threat model
-behind recorded evidence. The harness then builds the ranked queue and
-launches the selected backend. Its job is to create a controlled loop in
-which agents must produce evidence, not to decide that any source pattern is
-a finding.
+`bin/audit` owns session setup and supervision. Its job is to run a
+controlled loop in which agents must produce evidence, not to decide that
+any source pattern is a finding.
 
-The ranked queue is built from a few signals:
+Before any agent starts, it converges the builds and pins an immutable
+snapshot of the configuration (`.target.toml`) in the results tree, so live
+agents cannot silently change the runner, build, or threat model behind
+recorded evidence. It also takes a shared lease on each build tree, so a
+rebuild cannot replace the binary the evidence was measured against; a lease
+it cannot get is a warning for an audit and a hard stop for a benchmark.
+[Audit lifecycle](audit-lifecycle.md#3-run-the-audit) gives the full startup
+order.
 
-- which files handle untrusted input or do raw memory work;
-- which files were recently touched by security-relevant fixes;
-- which files are covered (or not covered) by existing tests and by earlier
-  probe coverage;
-- peer projects that share the same code or specs, when configured.
+Once running, an ordinary audit is a **continuous run**: every slot stays
+busy until the wall. A **steward tick**, every five minutes by default,
+re-ranks the queue, releases stale claims, and rotates starved strategy lanes
+without stopping any session. A background gate reviews each artifact once
+no live session is still writing it, and one final barrier after the last
+slot drains runs the work that is unsafe beside a live session.
+Pinned-strategy, delta, `--no-refill-workers`, and ensemble runs use a
+cohort loop with a pass after every iteration instead.
+[How slots are scheduled](audit-lifecycle.md#how-slots-are-scheduled) has
+the details.
 
-The ordering is deterministic first. An optional LLM rerank may boost cards,
-or, in its `primary` experiment mode
-([`RANK_WORK_LLM_MODE`](../reference/environment.md#local-model-endpoint)),
-order the ranked window outright with the deterministic score as the
-tiebreaker. If it is disabled, times out, or returns malformed JSON, the
-deterministic order stands, and in either mode the model only reorders the
-cards it was shown. The harness never lets a model decide what is *in scope*.
+## The ranked queue
 
-Agents claim one entry from the queue at a time. Claims prevent duplicate
-work on the same card or active surface; different strategy cards for one
-file can still coexist when the scheduler's subsystem rules allow them.
+The queue is built deterministically from a few signals:
+
+- code features: input-consumption entry points, deserialization sinks, raw
+  memory and lifetime operations, allocation, command and query
+  construction, access-control and credential decisions, and more;
+- files touched by earlier security-relevant fixes;
+- subsystems no probe has reached yet;
+- path shape, and seeds already promoted to the corpus.
+
+A **diversity floor** reserves part of the window for low-scoring files
+across subsystems, so the scoring rules alone do not define scope.
+Peer-project fixes and the target-wide S4 fuzz campaign enter as cards of
+their own rather than as ranking signals.
+[Strategy model](strategy-model.md#how-the-visible-window-is-filled)
+explains how the window is filled.
+
+An optional one-shot model rerank then adjusts the order: by default it
+adds a bounded boost to the cards it scores, and in its `primary` mode
+([`RANK_WORK_LLM_MODE`](../reference/environment.md#model-decisions)) it
+orders the window outright, with the deterministic score as tiebreaker. If
+the rerank is disabled, times out, or returns malformed JSON, the
+deterministic order stands. Either way the model only reorders cards it was
+shown: the harness never lets a model decide what is *in scope*.
 
 ## Work queue and structured state
 
-The work queue is the scheduler's contract with the agents. Durability does
-not mean every file is append-only: materialized views are replaced
-atomically, while event-style ledgers append rows.
+The work queue is the scheduler's contract with the agents. Durable does not
+mean append-only: materialized views are replaced atomically, while
+event-style ledgers append rows.
 
 ```text
-work-cards.jsonl       ranked materialized queue; rewritten on refresh
-state/claims.jsonl     append-only card lease and release events
-state/hypotheses.jsonl current hypothesis rows; atomically updated
-state/runs.jsonl       append-only probe verdicts
-state/notes.jsonl      append-only compact supporting notes
-state/events.jsonl     append-only audit events
-state/manifest.jsonl   every auditable file; rewritten on refresh
-state/receipts.jsonl   append-only examined-line receipts, pinned to content
-state/reads.jsonl      append-only transcript read requests, pinned to content
-state/sweep.json       the budgeted sweep's spend and stop reason
+work-cards.jsonl             ranked queue; rewritten on refresh
+state/
+  claims.jsonl               append-only card leases and releases
+  hypotheses.jsonl           hypotheses; status updates rewrite atomically
+  runs.jsonl                 append-only probe verdicts
+  notes.jsonl                append-only compact supporting notes
+  events.jsonl               append-only audit events
+  manifest.jsonl             every auditable file; rewritten on refresh
+  receipts.jsonl             append-only examined-line receipts
+  reads.jsonl                append-only transcript read requests
+  sweep.json                 the budgeted sweep's spend and stop reason
+  unreachable-routes.jsonl   route disproofs and out-of-scope triggers
+  run-config.json            pool size, backend, model, any delta scope
+  callgraph.json             the optional call-neighbourhood graph
 ```
 
-An agent skips cards that are already claimed, on a surface another agent
-owns, mode-incompatible, or in a subsystem another generic-mode agent already
-owns (unless the current agent has produced a crash or finding there). Claims
-expire on a timer so a wedged agent does not poison the queue.
-[Strategy model](strategy-model.md#how-a-card-gets-to-an-agent) carries the
-full ruleset and the rationale for each rule.
+An agent claims one open, unclaimed card at a time from its own strategy
+lane, and softly prefers a subsystem no other agent is working, so different
+strategy cards for one file can coexist when that preference allows. Claims
+expire after 30 minutes by default, so a wedged agent cannot hold the queue.
+[Strategy model](strategy-model.md#how-a-card-gets-to-an-agent) has the full
+rules and the reason for each.
 
 ## Agents
 
@@ -93,105 +116,82 @@ Each agent is a small autonomous worker:
 
 - it has a role (`reproduce` or `analysis`) and an active strategy (S1
   through S8);
-- it reads source through capped wrappers so prompts stay small;
+- it reads source through capped wrappers, so prompts stay small;
 - a reproduce agent writes one testcase at a time and runs it immediately;
-- an analysis agent primarily traces source and may file a concrete
-  source-only finding without first writing a testcase;
+- an analysis agent mostly traces source, may file a concrete source-only
+  finding without a testcase, and hands leads that need one to the reproduce
+  agents;
 - it records the line ranges or functions it read, so the next session on
   the same file starts from what is left;
-- it keeps a compact state snippet so a context compaction does not lose the
-  thread.
+- it keeps a compact state snippet, so a context compaction does not lose
+  the thread.
 
 Agents do not browse the source freely. The work queue points them at
-specific files, and the strategy decides what to look for inside those files:
-prior fixes, spec gaps, lifetime and state sequences, property oracles, and
-so on. If the current strategy goes dry, the harness rotates the agent to a
-different one, but only after structured state confirms the method was
-actually tried (see [Strategy model](strategy-model.md#strategy-rotation)).
+specific files, and the strategy decides what to look for inside those
+files: prior fixes, spec gaps, lifetime and state sequences, property
+oracles, and so on. When a strategy goes dry, the harness rotates the agent
+to another one, but only after structured state shows the method was
+actually tried (see [Strategy rotation](strategy-model.md#strategy-rotation)).
+
+The harness also calls the model itself. The queue rerank, finding substance
+votes, sweep units, and cluster expansion are one-shot decisions with no
+tools; source review of a trigger runs as a separate validator session with
+a small, fixed tool-call budget. Their usage lands in the same ledger as
+agent sessions.
 
 ## Review coverage
 
 The queue is a bounded window, so a clean run cannot by itself say what was
-never looked at. Four ledgers make that visible, and none of them is a gate
-on filing evidence:
-
-- the **manifest** lists every auditable file each ranking pass enumerated,
-  with its content hash and whether it ever entered the window;
-- **receipts** are verified line attestations from an agent or the budgeted
-  sweep, refused when they name lines or functions the manifest cannot
-  verify, and discounted once the file's content changes;
-- **transcript reads** are the file requests each session's backend
-  transcript shows, recorded after the session ends as the cross-check on
-  agent receipts;
-- the optional **budgeted sweep** runs beside the agent slots as its own
-  process, buying one tool-less decision per unreceipted unit of source
-  within `[sweep] token_budget`, and hands its leads to the reproduce lane.
-
-Once every parsed function of a file carries a receipt, the ranker mints one
-**call-edge** card for its resolved callers, a bounded second pass over
-cross-file contracts. `bin/state coverage` joins the ledgers into one report.
+never looked at. Three ledgers make that visible without gating evidence:
+the **manifest** of every auditable file, **receipts** for the lines an
+agent or the budgeted sweep examined, and **transcript reads** that
+cross-check agent receipts. The optional **budgeted sweep** buys tool-less
+breadth review within a token budget, and **call-edge** cards send agents
+back to check the contracts between a fully examined file and its callers.
+`bin/state coverage` joins it all into one report;
 [Review coverage](coverage.md) explains each piece and what it does not
 prove.
 
 ## The probe runner
 
-A single execution gate (`bin/probe`) runs every testcase. It:
+A single execution gate, `bin/probe`, runs every testcase. It reads the
+testcase header, picks the right runner (browser, JS shell, generic CLI,
+C/C++ or language harness, or the configured `[runner]`), captures output,
+and writes the verdict and its wall time to `state/runs.jsonl`.
 
-- reads the testcase header;
-- picks the right runner (browser, JS shell, generic CLI, C/C++ or language
-  harness, or the configured `[runner]`);
-- captures output and writes the verdict to `state/runs.jsonl`, with the
-  wall seconds the execution took.
+The wall time matters because a harness can loop internally: one recorded
+run may stand for a single call or for hundreds of thousands.
+`bin/state strategy-yield` therefore reports seconds beside run counts, so a
+strategy that consumed its sessions does not read as a cheap one.
 
-That duration matters more than it looks. A harness can loop internally, so
-one recorded run may stand for a single call or for hundreds of thousands;
-the run count alone cannot tell those apart. `bin/state strategy-yield`
-therefore reports `seconds`, `timed_runs`, `untimed_runs`, and
-`seconds_per_timed_run` beside `runs`, so a strategy that consumed the
-session does not read as a cheap one. A row written by a caller that supplies
-no duration counts as untimed rather than as a free probe. The timing spans
-sibling-build routing, because the recorded verdict can come from a routed
-candidate.
-
-For API-level testcases, the runner can compile a sibling harness source
-file, cache the compiled binary, and link it against the configured sanitizer
-library. Browser and JS targets use their configured coverage artifacts as a
-gate: a miss stops before the sanitizer. Generic native targets can use a
-route-equivalent SanitizerCoverage sibling as feedback; a native miss still
-runs the configured sanitizer. When no native sibling exists, the run
-proceeds with coverage unavailable rather than reporting a false miss.
-
-`bin/probe` discovers the active audit by walking upward from the testcase to
-`.session-env` in the result tree, so agents do not need to export target
-paths manually.
-
-The same gate enforces saved output for testcase-backed results: crash
-promotion requires a captured probe output file, while report-only FINDs go
-through FIND validation instead.
+For API-level testcases, the runner compiles and caches a harness linked
+against the configured sanitizer library. Browser and JS targets use
+coverage as a gate, so a miss stops before the sanitizer; a native miss is
+recorded as feedback and the sanitizer still runs. `bin/probe` finds the
+active audit by walking up from the testcase to the result tree's
+`.session-env`, so agents need not export target paths. A confirmed crash is
+filed by the probe itself, with its captured output, and never twice for the
+same crash state through the same route.
 
 ## Triage
 
 Triage checks the evidence and records a publication decision:
 
-- **Crashes** need a runnable testcase, a saved sanitizer or race
+- **Crashes** need a runnable testcase or harness, a saved sanitizer or race
   diagnostic, and complete report fields. Mechanical checks reject classes
-  such as OOM-only failures, assertion-only aborts, and plain null
-  dereferences.
+  such as out-of-memory failures, assertion-only aborts, stack overflows,
+  and plain null dereferences.
 - **Findings** need a concrete location, an explicit issue class, and an
   actionable security rationale. A reproducer is optional.
 
-Findings receive substance review before source review. Source review checks
-the trigger, caller contract, claimed consequence, and threat model. Missing
-required review keeps an artifact pending. A source disproof, an
-out-of-scope trigger, or scope still unresolved after completed review moves
-it to the corresponding rejected tree with a reason. Evidence is preserved.
-
-A current `validation.json` binds the decision to the evidence it evaluated.
-Only `reportable` results receive security credit. Human-pinned and legacy
-artifacts may retain a `not-reportable` state in place.
-
-[Triage and review](../guides/triage-results.md) is the canonical description
-of review stages, publication states, and rejection reasons.
+Both then get source review of the trigger, caller contract, claimed
+consequence, and threat model. Missing review keeps an artifact pending; a
+source disproof, an out-of-scope trigger, or scope still unresolved after
+completed review moves it to the matching rejected tree with a reason.
+Evidence is never deleted. A current `validation.json` binds the decision to
+the evidence it evaluated, and only a `reportable` result receives security
+credit. [Triage and review](../guides/triage-results.md) is the canonical
+description.
 
 ## Results layout
 
@@ -199,12 +199,11 @@ of review stages, publication states, and rejection reasons.
 output/<target>/<backend>/results/
   scratch-N/                   in-progress testcase work
   crashes/                     filed crash candidates and reviewed crashes
-  crashes-rejected/            rejected with reasons (skipped next session)
+  crashes-rejected/            rejected crashes with reasons
   findings/                    filed findings and their review state
   findings-rejected/           rejected findings and their reasons
   corpus/                      saved seeds with metadata
-  state/                       claims, hypotheses, notes, runs, events,
-                               manifest, receipts, reads, sweep
+  state/                       structured state and coverage ledgers
   work-cards.jsonl             the ranked queue
   patch-cards.jsonl            prior-fix work cards (strategy S1)
   s6-peer-cards.jsonl          peer-project fix cards (strategy S6)
@@ -212,18 +211,10 @@ output/<target>/<backend>/results/
   .session-env                 probe discovery file for this result tree
 ```
 
-Directory placement alone is not a publication decision. A current validation
-receipt records whether an artifact is reportable, unjudged, pending content,
-or a retained non-reportable engineering defect. Rejected artifacts move to
-the corresponding `*-rejected/` tree with their reason.
-
-Each of the four result trees carries its own generated HTML index:
-`crash-clusters.html`, `finding-clusters.html`, `rejected-crashes.html`,
-`rejected-findings.html`. Cross-backend rollups exist for the two active
-evidence trees, but not for rejected artifacts:
-
-- `output/<target>/crash-clusters.html`
-- `output/<target>/finding-clusters.html`
+Directory placement alone is not a publication decision; the current
+validation receipt is. Each result tree has its own HTML index, and
+`output/<target>/` holds cross-backend rollups of the crash and finding
+indexes. [Artifact layout](../reference/artifacts.md) lists every file.
 
 ## Backends and modes
 
@@ -234,66 +225,57 @@ bin/audit --backend <backend> --target <target> [--model <model>]
 bin/audit --backend all --target <target>   # cycle installed hosted backends across iterations
 ```
 
-In ensemble mode, each iteration selects the next configured, installed, and
-security-compatible hosted backend in `claude → codex → gemini → grok` order.
-Each backend writes into its own result tree. That is the ensembling surface:
-same target revision, same probe and triage rules, and independent evidence
-directories per backend.
+In ensemble mode, each iteration takes the next configured, installed, and
+security-compatible hosted backend in `claude → codex → gemini → grok`
+order. Each backend writes its own result tree: same target revision, same
+probe and triage rules, independent evidence. `--backend all` is also the
+default when neither `--backend` nor `AUDIT_BACKEND` names one; see
+[Backends](../guides/backends.md).
 
-```toml
-is_browser = "0"   # CLI tools, libraries, decoders, parsers, protocols
-is_browser = "1"   # browsers and browser-like runtime targets
-```
-
-Browser mode enables HTML/JS testcase assumptions, browser and shell agents,
-and a pre-run coverage gate. Where the gate cannot run for a browser, the
-probe records why and falls open to the diagnostic run.
-
-Generic mode is for everything else. Findings-only mode is gated by
-`[sanitizer].enabled = []` in `target.toml`, not by the language itself:
-typical for interpreted runtimes like Python, Ruby, Node, Java, and PHP, but
-valid for any project where ASan is not appropriate. In findings-only mode
-the probe runner invokes the configured `[runner]` and records its runtime
-diagnostic. It does not turn a panic or traceback into a FIND automatically:
-an agent must still write a substantive security report, and that report
-passes the findings validation lane. Sanitizer-class signals remain crash
-candidates when an enabled detector emits them.
+The target's mode is set in `target.toml`. Browser mode (`is_browser = "1"`)
+adds HTML/JS testcase assumptions, browser and shell agents, and a pre-run
+coverage gate. Generic mode (`"0"`) is for CLI tools, libraries, decoders,
+parsers, and protocols. Findings-only mode comes from
+`[sanitizer].enabled = []`, not from the language: it is typical for Python,
+Ruby, Node, Java, and PHP, but valid wherever ASan does not fit. There the
+probe records the runner's runtime diagnostic, but never turns a panic or
+traceback into a finding by itself: an agent must still write a substantive
+security report.
 
 ## Where to read the implementation
 
-For contributors tracing a behavior, start with the owning entry point and
-then follow its shared code:
+For contributors tracing a behaviour, start with the owning entry point and
+follow its shared code:
 
 | Responsibility | Main source files |
 | --- | --- |
-| Run setup and supervision | `bin/audit`, `lib/audit_runner.py` |
+| Run setup, scheduling, and supervision | `bin/audit`, `lib/audit_runner.py` |
+| Build convergence and build leases | `lib/build_preflight.py`, `lib/build_lease.py` |
 | Target configuration and language defaults | `bin/setup-target`, `lib/target_config.py`, `lib/languages.py` |
-| Work claims and durable state | `bin/state`, `lib/workqueue.py` |
+| Ranking, work claims, and durable state | `bin/rank-work`, `bin/state`, `lib/workqueue.py` |
+| Call-neighbourhood graph | `bin/callgraph`, `lib/callgraph.py` |
 | Session prompt assembly | `lib/prompt.py`, `lib/prompt_render.py`, `lib/prompts/` |
+| One-shot model decisions and backend launches | `lib/llm_decide.py`, `lib/llm_invoke.py` |
+| Usage and cost ledger | `lib/llm_usage.py`, `lib/benchmark.py` |
 | Testcase execution and recorded verdicts | `bin/probe`, `lib/sanitizer_run.py` |
 | Review coverage ledgers and the budgeted sweep | `lib/coverage_ledger.py`, `lib/read_ledger.py`, `lib/sweep.py`, `bin/sweep` |
 | Evidence review and publication receipts | `lib/triage.py`, `lib/validation_receipt.py` |
 | Experiment orchestration and measurement | `lib/benchmark_runner.py`, `lib/benchmark.py` |
 
-`AGENTS.md` and `.agents/` define the runtime audit instructions consumed by
-those components. [Development](../development.md) explains how to change
+`AGENTS.md` and `.agents/` hold the runtime audit instructions these
+components consume. [Development](../development.md) explains how to change
 TokenFuzz itself and verify the result.
 
 ## Quality gates
 
 The mechanisms that keep the loop honest:
 
-- testcase headers tied to target code and hypothesis IDs;
-- probe-first execution for crash candidates and testcase-backed findings;
-- multi-run confirmation for crash candidates;
-- first-class FIND validation for non-crashing security issues;
-- a rejected index for low-value crashes so they do not come back;
-- severity scoring and crash clustering as review aids;
-- capped search wrappers and session seeds to keep prompts small;
-- examined-line receipts pinned to content and cross-checked against
-  transcript reads, so coverage is measured rather than assumed;
-- evidence-aware strategy rotation, with a forced fallback for a method that
-  never produces qualifying evidence;
+- testcase headers tied to target code and hypotheses;
+- probe-first execution, with multi-run confirmation for crashes;
+- first-class validation for non-crashing findings;
+- mechanical rejection of low-value crash classes and repeat filings;
+- examined-line receipts cross-checked against transcript reads;
+- evidence-aware strategy rotation;
 - report fields that triage can parse mechanically.
 
 These checks make the result inspectable. They do not replace a maintainer's

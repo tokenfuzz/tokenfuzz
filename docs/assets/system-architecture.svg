@@ -52,7 +52,7 @@
   <text x="40" y="150" class="lane-tag">Audit</text>
   <g filter="url(#sa-shadow)"><rect x="200" y="154" width="560" height="58" class="orch"/></g>
   <text x="220" y="178" class="title-w">bin/audit</text>
-  <text x="220" y="200" class="sub">Preflights build, pins config and revision, creates results, launches agents.</text>
+  <text x="220" y="200" class="sub">Records revision, creates results, preflights build, pins config, launches agents.</text>
 
   <!-- Audit → queue -->
   <path d="M480,212 L480,222" class="arrow" marker-end="url(#sa-arrow)"/>
@@ -115,8 +115,8 @@
   <text x="794" y="480" class="micro">Every auditable file:</text>
   <text x="794" y="496" class="micro">offered, read, attested,</text>
   <text x="794" y="512" class="micro">or never reached.</text>
-  <text x="794" y="528" class="micro">The budgeted sweep</text>
-  <text x="794" y="544" class="micro">reads the remainder.</text>
+  <text x="794" y="528" class="micro">An optional, budgeted</text>
+  <text x="794" y="544" class="micro">sweep adds breadth.</text>
 
   <!-- Probe → triage -->
   <path d="M480,468 L480,486" class="arrow" marker-end="url(#sa-arrow)"/>
