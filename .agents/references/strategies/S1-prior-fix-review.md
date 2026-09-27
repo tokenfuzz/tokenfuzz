@@ -16,8 +16,6 @@ analogue with a plausible guard gap: turn it into a testcase or a
 NEEDS_TESTCASE row first.
 <!-- brief:end -->
 
-**Highest-signal strategy. 3/7 historical findings came from this.**
-
 Mine prior fixes AND large refactors for incomplete patches, reverted fixes, and
 unfixed sibling patterns. This combines prior-fix review with regression-window mining.
 

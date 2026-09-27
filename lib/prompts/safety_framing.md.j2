@@ -159,8 +159,9 @@ Defaulting to `obeyed` inflates verdicts.
 `fs-state`, or `both` (= `bytes,call-sequence`). When a component lies outside
 this target's `attacker_controls` (`output/<slug>/target.toml`), a source
 reviewer reads the code and decides in triage whether the crash is a security
-report or a retained defect that crosses no security boundary; the crash stays
-in `crashes/`, so never pre-demote it to `findings/` or DISCARDED. If the crash
+report or a defect that crosses no security boundary, which triage rejects
+into `crashes-rejected/` with its evidence kept. File it in `crashes/`
+either way; never pre-demote it to `findings/` or DISCARDED. If the crash
 needs a non-default mode, module, codec, filter, or option that the application
 or operator selects rather than the input bytes, write
 `Parameter control: application-supplied` and name the invocation. `Strategy`

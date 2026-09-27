@@ -188,13 +188,11 @@ when the target has `node_modules/.bin/ts-node` or one is on `PATH`. A
 project that needs another loader sets `[runner].bin` to it. When that loader
 is `ts-node`, preflight runs it on an empty program first.
 
-??? note "TypeScript resolution hooks on UBSan, MSan, and TSan routes"
-    The UBSan, MSan, and TSan runners preload `lib/typescript_hooks.cjs`
-    through `NODE_OPTIONS` (after any the target sets) whenever they launch a
-    binary named `node`. The ASan, `race`, and findings-only routes do not,
-    so a findings-only Node target gets Node's own type stripping and
-    resolution. The hooks need Node 22.15 or later and act only on
-    TypeScript source:
+??? note "TypeScript resolution hooks"
+    Every generic runner route, findings-only included, preloads
+    `lib/typescript_hooks.cjs` through `NODE_OPTIONS` (after any the target
+    sets) whenever it launches a binary named `node`. The hooks need Node
+    22.15 or later and act only on TypeScript source:
 
     - An import Node cannot resolve from a `.ts` file is resolved with the
       target's own `typescript` package and nearest `tsconfig.json`, so

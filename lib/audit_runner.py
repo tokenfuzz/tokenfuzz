@@ -4983,6 +4983,20 @@ def bound_target_root(root: Path, target: str, target_path: str = "") -> Path:
     return Path(target_path or root / "targets" / target).expanduser().resolve()
 
 
+def bound_target_slug(root: Path, target: str, target_path: str = "") -> str:
+    """The slug an audit files its output under.
+
+    Taken from the path as addressed, not from the canonical root: a local
+    source tree set up as targets/<slug> is a link to a directory whose own
+    name is not the slug its target.toml was written under.
+    """
+    addressed = (
+        os.path.abspath(os.path.expanduser(target_path)) if target_path
+        else str(root / "targets" / target)
+    )
+    return audit_helpers.sanitize_target_slug(addressed, str(root / "targets"))
+
+
 def main(argv: list[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
     parser = build_parser()
@@ -5006,7 +5020,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"FATAL: target path does not exist: {target_root}", file=sys.stderr)
         return 1
     try:
-        target_slug = audit_helpers.sanitize_target_slug(str(target_root), str(root / "targets"))
+        target_slug = bound_target_slug(root, effective_target, args.target_path)
         output_slug = _output_slug(target_slug, args.experiment)
     except ValueError as exc:
         print(f"FATAL: {exc}", file=sys.stderr)

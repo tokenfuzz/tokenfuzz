@@ -230,6 +230,14 @@ ok(inv.opencode_config("m", "external-bypass").get("permission") == {"webfetch":
    "oss agent launch (external-bypass) denies web like every other backend")
 ok(inv.opencode_config("m", "sandboxed").get("permission", {}).get("external_directory") == "deny",
    "oss sandboxed decide config keeps its full deny set")
+# A decision passes no profile: it keeps the denies outside a run and follows
+# the profile an oss run exports, never the oss agent default on its own.
+with mock.patch.dict(os.environ, {inv.AGENT_SECURITY_ENV: ""}):
+    ok(inv.opencode_config("m").get("permission", {}).get("external_directory") == "deny",
+       "an oss decision outside a run keeps the external-directory deny")
+with mock.patch.dict(os.environ, {inv.AGENT_SECURITY_ENV: "external-bypass"}):
+    ok(inv.opencode_config("m").get("permission") == {"webfetch": "deny", "websearch": "deny"},
+       "an oss decision inside an external-bypass run follows the run's profile")
 proc = run(["agent-flags", "oss"], check=True)
 f = flags(proc)
 assert_eq(
@@ -1175,6 +1183,13 @@ with tempfile.TemporaryDirectory() as fake_home:
     )
     ok("mcp_servers.remote_docs.enabled=false" in agent_with_servers,
        "agent_flags('codex') carries the user-extension overrides")
+    # Python 3.10 has no tomllib; the supported floor installs tomli instead.
+    real_toml = inv._load_tomllib()
+    with mock.patch.dict(os.environ, {"CODEX_HOME": fake_home}), \
+            mock.patch.dict(sys.modules, {"tomllib": None, "tomli": real_toml}), \
+            mock.patch.object(inv, "_codex_user_extension_flags", {}):
+        assert_eq(extension_flags, inv.codex_user_extension_off_flags(),
+                  "Codex user extensions are read through tomli where tomllib is missing")
     # Containment that cannot be established refuses the launch, as an
     # unusable security mode does, rather than starting with a server live.
     for label, text in (

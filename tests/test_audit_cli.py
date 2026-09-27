@@ -160,6 +160,40 @@ class AuditCliTests(unittest.TestCase):
                 real.resolve(),
             )
 
+    def test_a_linked_local_tree_keeps_the_slug_it_was_set_up_under(self) -> None:
+        # bin/setup-target links a local source tree in as targets/<slug>; the
+        # output, and the target.toml setup wrote, live under that slug rather
+        # than the linked directory's own name.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "checkout"
+            source = Path(directory) / "Parser Src"
+            source.mkdir()
+            (root / "targets" / "org").mkdir(parents=True)
+            for slug in ("sampleproj", "org/sampleproj"):
+                with self.subTest(slug=slug):
+                    (root / "targets" / slug).symlink_to(source, target_is_directory=True)
+                    self.assertEqual(audit_runner.bound_target_slug(root, slug), slug)
+                    self.assertEqual(
+                        audit_runner.bound_target_slug(
+                            root, "", str(root / "targets" / slug),
+                        ),
+                        slug,
+                    )
+                    self.assertEqual(
+                        audit_runner.bound_target_root(root, slug), source.resolve(),
+                    )
+            # A tree outside targets/ is still named after its directory.
+            self.assertEqual(
+                audit_runner.bound_target_slug(root, "", str(source)), "parser-src",
+            )
+            # So is a benchmark cell reaching targets/ through its facade.
+            facade = Path(directory) / "facade"
+            facade.mkdir()
+            (facade / "targets").symlink_to(root / "targets", target_is_directory=True)
+            self.assertEqual(
+                audit_runner.bound_target_slug(facade, "sampleproj"), "sampleproj",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

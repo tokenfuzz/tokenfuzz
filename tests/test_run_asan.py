@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.machinery
 import importlib.util
+import json
 import os
 import shutil
 import stat
@@ -245,6 +246,32 @@ class RunAsanTests(unittest.TestCase):
         )
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertEqual(argv_log.read_text(encoding="utf-8"), "")
+
+    def test_findings_only_node_runner_preloads_the_typescript_hooks(self) -> None:
+        # Node targets run findings-only, and bin/probe sends that route here,
+        # not through lib/sanitizer_run.py's generic runner.
+        options_log = self.root / "node-options.txt"
+        source = (
+            "import os, pathlib\n"
+            "pathlib.Path(os.environ['OPTIONS_LOG']).write_text("
+            "os.environ.get('NODE_OPTIONS', ''))\n"
+        )
+        hooks = f"--require {json.dumps(str(run_asan.sanitizer_run.TYPESCRIPT_HOOKS))}"
+        for name, expected in (
+            ("node", f"--max-old-space-size=64 {hooks}"),
+            ("parser", "--max-old-space-size=64"),
+        ):
+            with self.subTest(runner=name):
+                proc = self.run_command(
+                    "generic", "/dev/null",
+                    ASAN_GENERIC_BIN=self.executable(name, source),
+                    PROBE_SANITIZER_SELECTED="runner",
+                    ASAN_GENERIC_DISABLE_OPTIONS="1",
+                    NODE_OPTIONS="--max-old-space-size=64",
+                    OPTIONS_LOG=options_log,
+                )
+                self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+                self.assertEqual(options_log.read_text(encoding="utf-8"), expected)
 
     def test_probe_explicit_non_runner_cwd_beats_path_fallback(self) -> None:
         binary = self.executable("shared-runner", "pass\n")

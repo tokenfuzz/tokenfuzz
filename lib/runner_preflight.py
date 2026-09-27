@@ -419,7 +419,7 @@ def validate(config, logger: Callable[[str], object] | None = None) -> Path | No
     if unreachable:
         raise RuntimeError(
             f"configured [runner] starts but cannot reach the audited tree: "
-            f"{unreachable}. Re-run `bin/setup-target --target "
+            f"{unreachable}. Re-run `bin/setup-target "
             f"{config.slug or '<slug>'} --build`, or correct [runner] in the "
             f"target's target.toml."
         )

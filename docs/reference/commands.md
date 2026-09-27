@@ -70,11 +70,9 @@ model and peers unless you add `--no-llm-config` or no backend answers. See
 for what is carried over.
 
 **Symlinked local trees.** Builds and `.audit/` are written into the linked
-directory. `bin/audit` follows the symlink, names the output tree after the
-directory's basename, and does not rebuild it at preflight. Use a top-level
-slug equal to the directory name (`bin/setup-target myparser
-~/code/myparser`), and rerun `bin/setup-target <target> --build` after
-source changes.
+directory. `bin/audit` follows the symlink and keeps the output tree under
+the slug, but does not rebuild the linked tree at preflight: rerun
+`bin/setup-target <target> --build` after source changes.
 
 **Source layout.** With `--build`, Git submodules are synced and initialised
 recursively first. A checkout root with no build manifest uses one child
@@ -575,7 +573,7 @@ bin/export-benchmark --target "$TARGET" --backend "$BACKEND" --format zip
 | `--run-id <id>` | UTC timestamp | Run directory under `<bench-root>/<backend>/`; reuse it to resume. |
 | `--isolate-build` | off | Build into a private tree keyed by build inputs instead of sharing the canonical build. |
 | `--no-validate-findings` | off | Skip the post-cell finding review; filed findings stay unconfirmed. `--validate-findings` is the default. |
-| `--dry-run` | off | Launch no backend; write synthetic cells instead. They are still scored and published to the ledger and result page under the bench root, so point `--bench-root` at a scratch location. |
+| `--dry-run` | off | Launch no backend; write synthetic cells instead. They are still scored and published to the ledger and result page under the bench root, so point `--bench-root` at a scratch location. With `--regenerate`, pools are rebuilt without model decisions; with `--prune-cache`, it only lists what would be removed. |
 | `--regenerate` | off | Rebuild scores, ledger, and pages without new cells; may replay artifacts and invoke reviewers. Without `--target`, every recorded run. |
 | `--rebuild-report` | off | Rebuild `benchmark-result.md`/`.html` from existing run state only. |
 | `--prune-cache` | off | Drop cached harness builds that no run on disk names. |

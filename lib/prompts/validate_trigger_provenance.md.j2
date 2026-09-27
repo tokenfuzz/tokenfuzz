@@ -346,8 +346,8 @@ Definitions:
   sequence to disclose an address or shape mappings remains a component.
 - For Reject, `rejection_kind` distinguishes a false security claim from a
   real target defect that adds no capability at a code-execution or trusted
-  operator surface. Use `no-added-boundary` only for the latter; it remains
-  visible as a retained engineering defect instead of a security bug.
+  operator surface. Use `no-added-boundary` only for the latter; it is
+  rejected as an engineering defect, evidence kept, instead of a security bug.
   Use `consequence-disproved` only when source contradicts the report's exact
   security consequence, not when evidence is missing or a different scenario
   would be required.

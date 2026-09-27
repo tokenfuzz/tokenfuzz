@@ -351,7 +351,7 @@ shapes:
 **Property-as-oracle (no sanitizer crash expected):**
 ```
 // TARGET: file:function:line
-// HYPOTHESIS-ID: Hn
+// HYPOTHESIS-ID: H-<id>
 // CATEGORY: state                ← logic/state-corruption findings use 'state'
 // PROPERTY: inverse|idempotence|injectivity|domain|format|equivalence
 // PROPERTY-BUDGET: <N inputs tested>
@@ -361,7 +361,7 @@ shapes:
 **Property + sanitizer (counter-example also crashes ASan — rare bonus):**
 ```
 // TARGET: file:function:line
-// HYPOTHESIS-ID: Hn
+// HYPOTHESIS-ID: H-<id>
 // CATEGORY: <real category>
 // PROPERTY: <one of the six>
 ```
@@ -376,7 +376,7 @@ security-consumer test below is satisfied.
 For an opaque byte input, keep the bytes exact and provide the fields that
 cannot live in a header as flags:
 ```
-bin/probe --hypothesis-id Hn --property inverse <testcase>
+bin/probe --hypothesis-id H-<id> --property inverse <testcase>
 ```
 
 When the property is violated and ASan is clean, **first decide whether the

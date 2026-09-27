@@ -71,9 +71,6 @@ before choosing browser mode:
 
 - The shell canary is JavaScript, so a runtime must execute a `.js` file that
   calls `print`.
-- With `asan_bin` set, `bin/probe` runs `asan_bin <testcase>` and ignores
-  `[runner].args` on a browser-mode target, although the preflight canary
-  applies them.
 - A crash whose testcase is not `.html`, `.htm`, `.xhtml`, `.svg`, `.js`, or
   `.mjs` (a `.wasm` module, for example) cannot be exported, so its bundle
   stays incomplete and triage eventually rejects it.
@@ -116,7 +113,7 @@ resolve through that suffix.
 | Testcase | Page route | Script-engine route |
 | --- | --- | --- |
 | `.html`, `.htm`, `.xhtml`, `.svg` | `browser` mode | `browser` mode, which fails: the target declares no page route |
-| `.js`, `.mjs` | `js` mode: the JS shell at `build-asan/dist/bin/js` (`ASAN_JS` overrides it for ASan) | `generic` mode: `asan_bin <testcase>` |
+| `.js`, `.mjs` | `js` mode: the JS shell at `build-asan/dist/bin/js` (`ASAN_JS` overrides it for ASan) | `generic` mode: `asan_bin` with `[runner].args`, as the shell canary runs it |
 | Anything else | `browser` mode | `generic` mode |
 
 A `MODE:` header or `bin/probe --mode` overrides the choice. Browser mode

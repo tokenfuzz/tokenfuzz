@@ -447,6 +447,38 @@ class ProbeArgumentTests(unittest.TestCase):
 
         self.assertEqual(instance._mode(), "generic")
 
+    def test_script_engine_shell_runs_with_its_runner_args(self) -> None:
+        # The audit preflight's shell canary proves the shell with these args,
+        # so a probe on the same route must run them too. A page browser's args
+        # are its browser-mode launch template and never reach the generic
+        # command.
+        for runner_args, expected in (
+            (["--wasm", "{TESTCASE}"], ["--wasm", "/tmp/crafted.js"]),
+            (["-profile", "{PROFILE}", "{TESTCASE}"], []),
+        ):
+            with self.subTest(runner_args=runner_args):
+                instance = object.__new__(probe.Probe)
+                instance.args = SimpleNamespace(args=[])
+                instance.repro_args = []
+                instance.header = {"harness": ""}
+                instance.mode = "generic"
+                instance.sanitizer = "asan"
+                instance.build_kind = ""
+                instance.exec_testcase = Path("/tmp/crafted.js")
+                instance.testcase = instance.exec_testcase
+                instance.environment = {}
+                instance.config = SimpleNamespace(
+                    is_browser="1", build_system="", runner_args=runner_args,
+                    runner_bin="", target_root="/tmp/target",
+                    results_dir="/tmp/results", slug="sampleproj",
+                    sanitizer_bin=lambda _name: "build-asan/shell",
+                    resolve_path=lambda value: f"/tmp/target/{value}",
+                )
+
+                command = instance._command()
+
+                self.assertEqual(command[4:], expected)
+
     def test_opaque_non_browser_input_remains_generic(self) -> None:
         instance = object.__new__(probe.Probe)
         instance.args = SimpleNamespace(mode="auto")

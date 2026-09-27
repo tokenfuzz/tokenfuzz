@@ -116,7 +116,7 @@ output and receive no finding credit.
 Every testcase MUST begin with native comment lines containing these fields:
 ```
 // TARGET: file:function:line
-// HYPOTHESIS-ID: Hn
+// HYPOTHESIS-ID: H-<id>
 // CATEGORY: bounds|lifetime|type|size|uninit|state
 // HARNESS: harness.c            (OPTIONAL — sibling harness source)
 ```
@@ -378,7 +378,7 @@ value the docs do not forbid, reproduced through a public boundary — DO belong
 contract violation. Belonging in `crashes/` is a filing rule, not a prediction
 of credit: a trigger outside the target's `attacker_controls` earns none, so
 file such a crash as a by-product and do not spend a session re-reaching it —
-a `NOT-REPORTABLE` row in `crashes/crash-clusters.md` is a mechanism already
+a `threat-model:` rejection in `crashes-rejected/` is a mechanism already
 credited nothing. A neighbouring code path is judged on its own trigger, not
 the neighbour's. For a borderline caller-misuse / harness-artifact case, keep
 iterating toward a legitimate input boundary or mark the hypothesis DISCARDED.
@@ -460,8 +460,9 @@ component is outside the target's `attacker_controls` (declared in
 
 The verdict above starts triage's publication decision, not a filing decision
 for you, and a source reviewer settles it against the code. A `robustness`
-verdict KEEPS the crash in `crashes/` as a defect that crosses no security
-boundary: no numeric security score, no security yield. So when
+verdict the reviewer confirms moves the crash to `crashes-rejected/` with a
+`threat-model:` reason, as a defect that crosses no security boundary: its
+evidence is kept, with no numeric security score and no security yield. So when
 a testcase reproduces a sanitizer diagnostic through a public boundary and clears
 conditions 1–3, file it under `crashes/` regardless of trigger source. Do not
 pre-demote a `call-sequence`/`env`/`race` crash to `findings/` just because the

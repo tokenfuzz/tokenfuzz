@@ -696,10 +696,9 @@ def codex_user_extension_off_flags() -> list[str]:
     servers: dict = {}
     if config.is_file():
         try:
-            import tomllib
-            parsed = tomllib.loads(config.read_text(encoding="utf-8"))
+            parsed = _load_tomllib().loads(config.read_text(encoding="utf-8"))
             servers = parsed.get("mcp_servers") or {}
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, ImportError) as exc:
             raise ValueError(
                 f"cannot read Codex MCP servers from {config} ({exc}), so an "
                 "audit launch cannot disable them; fix the file before auditing"
@@ -831,9 +830,9 @@ def opencode_config(model: str, agent_security: str | None = None) -> dict:
         }
     # Deliberately resolved without the backend, so the oss agent default does
     # not reach here: an agent launch always passes its already-resolved
-    # profile, and the only caller that passes none is the read-only decide
-    # path, which should keep these denies rather than inherit a boundary it
-    # never asserts.
+    # profile, and the decide path passes none. A decision keeps these denies
+    # unless the run it serves exported its profile: inside an external-bypass
+    # oss run it inherits that boundary, no wider than the run's own agents.
     if resolve_agent_security(agent_security) == "sandboxed":
         # OpenCode permissions are an approval policy, not an OS sandbox, so
         # agent launches refuse this backend in sandboxed mode. These denies

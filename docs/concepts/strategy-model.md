@@ -33,8 +33,9 @@ to give up on the method within a session; the harness's own
 | **REF** Pattern reference | Grep recipes (size math, type-conversion chains, sentinel collisions, dangerous sinks, and more) used beside the assigned strategy. Not a strategy. | — |
 
 S1 is the **fallback**, not the default first move: a file that signals no
-other strategy is labelled S1, and an unpinned agent gets the S1 lane only
-when no other lane has claimable cards. Prior fixes still carry concrete
+other strategy is labelled S1, and an unpinned agent starts on the S1 lane
+only when no other lane has claimable cards, though rotation can move a dry
+agent there. Prior fixes still carry concrete
 information (what changed, which assumption was wrong), which is why patch
 cards keep a large share of the window.
 

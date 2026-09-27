@@ -4242,6 +4242,20 @@ def browser_page_launch_configured(config: object) -> bool:
     return any("{PROFILE}" in value for value in args)
 
 
+def runner_block_drives_sanitizer_bin(config: object) -> bool:
+    """Whether ``[runner]`` describes how the sanitizer binary itself runs.
+
+    A separate runner_bin owns the block, and a page browser's args are its
+    launch template for browser mode. Otherwise the args say how the
+    instrumented binary consumes ``{TESTCASE}``, a script engine's shell
+    included, which is how the audit preflight's shell canary runs it.
+    """
+    if getattr(config, "runner_bin", ""):
+        return False
+    is_browser = str(getattr(config, "is_browser", "0")).lower() in {"1", "true"}
+    return not (is_browser and browser_page_launch_configured(config))
+
+
 def update_browser_mode(toml_path: str | os.PathLike, enabled: bool) -> bool:
     """Update only the explicit browser-mode scalar in an existing config."""
     path = Path(toml_path)

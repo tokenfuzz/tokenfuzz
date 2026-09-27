@@ -3075,7 +3075,8 @@ def main(argv: list[str] | None = None) -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--report", type=Path, default=None, help="Crash dir containing report.md")
     ap.add_argument("--batch", type=Path, default=None,
-                    help="Results dir; runs --report on every crashes/CRASH-*/ underneath")
+                    help="Results dir; runs --report on every findings/FIND-*/ and "
+                         "crashes/CRASH-*/ report underneath")
     ap.add_argument("--json", action="store_true", help="Emit JSON instead of human summary")
     ap.add_argument("--harness-rooted-check", action="store_true",
                     help="With --report: read-only — print 1 and exit 0 if the crash "

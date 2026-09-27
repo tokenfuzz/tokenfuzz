@@ -288,6 +288,8 @@ def run_generic(
     disabled = BASE_ENV.get("ASAN_GENERIC_DISABLE_OPTIONS") == "1" or bool(CONFIG and CONFIG.sanitizers_explicitly_disabled)
     runtime_sanitizer = selected if selected in {"race", "runner"} else ("none" if disabled else "asan")
     environment = runtime_env(option_string, runtime_sanitizer)
+    # Node targets run findings-only, so this is the route their testcases take.
+    environment.update(sanitizer_run.node_options(binary, environment))
     command = [binary]
     if not sanitizer.generic_skips_testcase(selected, BASE_ENV):
         command.append(testcase)

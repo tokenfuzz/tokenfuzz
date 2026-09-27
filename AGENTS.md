@@ -96,19 +96,24 @@ Prefer the sanitizer wrappers (`bin/run-asan`, `bin/run-ubsan`, `bin/run-msan`,
 
 ---
 
-## STRATEGY PRIORITY (8 active strategies + 1 pattern reference)
+## STRATEGY LANES (8 active strategies + 1 pattern reference)
 
-| Priority | Strategy | When |
-|----------|----------|------|
-| **1st (fallback default)** | **S1: Prior-fix + regression variant** | Default only when the queue has no higher-signal card assigned. The harness queue may rank another card above every S1 patch card — follow the assigned strategy when one is given. Mines own fixes AND refactors for unfixed analogues. |
-| **2nd** | **S2: Invariant negation** | Mechanical: break asserts, algorithm assumptions, multi-precondition gates. |
-| **3rd** | **S3: Rule-vs-implementation** | LLM-native: trace a stated security, specification, or fast/slow-path rule to the exact code that must enforce it. Security-boundary cards start with access, identity/origin, credential/assertion, outbound-request, query/template, path, injection, deserialization, or external-entity decisions. |
-| **4th** | **S4: Boundary-directed fuzzing** | The only strategy that runs a fuzzer. `bin/fuzz candidates` admits a published, input-shape-compatible API no harness drives; trace a product input route to it before building; `bin/fuzz template` grounds setup in at most two local callers and carries a source receipt; improve or write one faithful harness, then spend one bounded campaign. Artifacts replay through `bin/probe`. |
-| **5th** | **S5: Lifetime & state violation** | Re-entrancy, error-path cleanup, thread races, state machine sequences. |
-| **6th** | **S6: Cross-project variant mining** | Mine peer projects' fixes for bug classes in target. |
-| **7th** | **S7: Adversarial input** | Targeted parser/decoder boundary inputs, written by hand. A minimal public-API driver may deliver those bytes when the runner cannot; fuzz harness generation, corpora, and fuzzing are S4. |
-| **8th** | **S8: Property-based oracles** | Sanitizer-free oracles for silent corruption: idempotence, injectivity, numerical domain, format compliance, inverse operations. |
-| Ref | **REF: Pattern search library** | Grep patterns for use alongside any strategy. |
+The harness assigns each agent a strategy lane, and every work card carries
+its strategy: follow the one you are given. S1 is the fallback lane: an
+agent starts on it only when no other lane has claimable cards, though
+rotation can move a dry agent there.
+
+| Strategy | When |
+|----------|------|
+| **S1: Prior-fix + regression variant** | Fallback lane. Mines own fixes AND refactors for unfixed analogues. |
+| **S2: Invariant negation** | Mechanical: break asserts, algorithm assumptions, multi-precondition gates. |
+| **S3: Rule-vs-implementation** | LLM-native: trace a stated security, specification, or fast/slow-path rule to the exact code that must enforce it. Security-boundary cards start with access, identity/origin, credential/assertion, outbound-request, query/template, path, injection, deserialization, or external-entity decisions. |
+| **S4: Boundary-directed fuzzing** | The only strategy that runs a fuzzer. `bin/fuzz candidates` admits a published, input-shape-compatible API no harness drives; trace a product input route to it before building; `bin/fuzz template` grounds setup in at most two local callers and carries a source receipt; improve or write one faithful harness, then spend one bounded campaign. Artifacts replay through `bin/probe`. |
+| **S5: Lifetime & state violation** | Re-entrancy, error-path cleanup, thread races, state machine sequences. |
+| **S6: Cross-project variant mining** | Mine peer projects' fixes for bug classes in target. |
+| **S7: Adversarial input** | Targeted parser/decoder boundary inputs, written by hand. A minimal public-API driver may deliver those bytes when the runner cannot; fuzz harness generation, corpora, and fuzzing are S4. |
+| **S8: Property-based oracles** | Sanitizer-free oracles for silent corruption: idempotence, injectivity, numerical domain, format compliance, inverse operations. |
+| **REF: Pattern search library** | Grep patterns for use alongside any strategy. |
 
 Full strategy index: `.agents/references/strategies/README.md`. The
 harness-rendered strategy brief carries the strategy's method and every gate;
@@ -176,17 +181,17 @@ targets, it means reachable through the documented input boundary
 **Trigger outside the threat model is triage's call, not yours.** A reproducing
 memory-safety crash through a public boundary still goes under `crashes/` even
 when its `Trigger source` (e.g. `call-sequence`, `env`, `race`) falls outside the
-target's `attacker_controls`. Triage keeps the engineering evidence in
-`crashes/`, and a source reviewer decides from the code whether anything in
-`attacker_controls` decides the fault. When nothing does, the crash is kept as
-a defect that crosses no security boundary: not a security report, no security
-yield, and no numeric CVSS score. Do not
+target's `attacker_controls`; a source reviewer decides from the code whether
+anything in `attacker_controls` decides the fault. When nothing does, triage
+moves the crash to `crashes-rejected/` with a `threat-model:` reason, keeping
+its evidence: a defect that crosses no security boundary, not a security
+report, no security yield, and no numeric CVSS score. Do not
 pre-demote such a crash to `findings/` or discard it: file the reproducer and
 let triage make that call. (Only source-disproved misuse and
-the auto-quarantine classes below are kept out of `crashes/`.) Filing one is
-cheap; re-reaching it is not — a `NOT-REPORTABLE` row in
-`crashes/crash-clusters.md` is a mechanism already reviewed and credited
-nothing, so another route to the same mechanism earns nothing either. A
+the auto-quarantine classes below are never filed in `crashes/`.) Filing one is
+cheap; re-reaching it is not — a `threat-model:` rejection in
+`crashes-rejected/` is a mechanism already reviewed and credited nothing, so
+another route to the same mechanism earns nothing either. A
 bundle whose crash state and recorded probe route match a promoted bundle is
 folded into it by triage (its files move to `crashes/.duplicates/`, the
 hypothesis closes with the promoted CRASH id), so equivalent evidence buys no

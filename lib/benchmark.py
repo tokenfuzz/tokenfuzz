@@ -8269,11 +8269,7 @@ def resolve_reverify_lines(
         # argv or env to the sanitizer binary runs the wrong route, and a clean
         # result there reads as `not-reproduced` against a real crash.
         runner_block_applies = config is not None and (
-            runner_selected
-            or (
-                not config.runner_bin
-                and str(config.is_browser).lower() not in {"1", "true"}
-            )
+            runner_selected or _tc.runner_block_drives_sanitizer_bin(config)
         )
         if runner_block_applies:
             import sanitizer_run

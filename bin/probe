@@ -127,7 +127,7 @@ HELP = """Usage:
 
 Required testcase headers:
   TARGET: <file[:function[:line]]>
-  HYPOTHESIS-ID: H<n>
+  HYPOTHESIS-ID: H-<id>, as bin/state add-hyp printed it
   CATEGORY: bounds|lifetime|type|size|uninit|state
 
 Optional testcase headers:
@@ -1426,9 +1426,7 @@ class Probe:
             # existing argv template without replacing the instrumented binary.
             uses_sanitizer_args = bool(
                 self.config.runner_args
-                and not self.config.runner_bin
-                and str(getattr(self.config, "is_browser", "0")).lower()
-                not in {"1", "true"}
+                and target_config.runner_block_drives_sanitizer_bin(self.config)
             )
         elif self.config.runner_bin:
             binary = resolve_executable(self.config.runner_bin, self.config)

@@ -23,9 +23,9 @@ Clustering signature (deterministic, no LLM):
      applying the ClusterFuzz stack-frame ignore rules and frame filtering.
 
 Two crashes go in the same cluster when their crash types and crash states
-are similar under ClusterFuzz's CrashComparer heuristic: exact match,
-at least two common ordered crash-state frames, or average line similarity
-above the ClusterFuzz threshold.
+are similar under ClusterFuzz's CrashComparer heuristic: exact match, or
+at least two common ordered crash-state frames (CLUSTER_LCS_THRESHOLD).
+Its average line similarity fallback is off unless CLUSTER_FUZZY_MATCH=1.
 
 The tool is read-mostly for the report bundles: it only edits the
 "Cluster:" line in each report.md. It does NOT touch any other section,
@@ -371,9 +371,9 @@ def _cf_fuzzy_threshold() -> float:
 def _cf_is_similar(state_1: str, state_2: str) -> bool:
     """ClusterFuzz CrashComparer.is_similar equivalent.
 
-    Stricter than upstream by default: LCS threshold is 3 (was 2) and the
-    fuzzy per-line similarity fallback is opt-in via CLUSTER_FUZZY_MATCH.
-    Both are tunable for users who want looser grouping.
+    Stricter than upstream by default: the LCS threshold matches upstream's
+    2, but the fuzzy per-line similarity fallback is opt-in via
+    CLUSTER_FUZZY_MATCH. Both are tunable (see _cf_lcs_threshold).
     """
     if not state_1 or not state_2:
         return False

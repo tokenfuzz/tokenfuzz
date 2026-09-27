@@ -868,7 +868,12 @@ def parser() -> argparse.ArgumentParser:
     )
     result.add_argument(
         "--dry-run", action="store_true",
-        help="plan the cells and write run metadata without launching any backend",
+        help=(
+            "launch no backend: run synthetic cells and score them into the "
+            "ledger and result page under --bench-root, so use a scratch "
+            "--bench-root; with --regenerate, rebuild pools without model "
+            "decisions; with --prune-cache, list what would be removed"
+        ),
     )
     result.add_argument(
         "--isolate-build", action="store_true",

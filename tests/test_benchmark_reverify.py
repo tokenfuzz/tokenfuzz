@@ -1096,6 +1096,29 @@ class BenchmarkReverifyTests(unittest.TestCase):
         self.assertEqual(fields["BIN"], str(target / "build-asan" / "src" / "stub"))
         self.assertEqual(replay_args, [])
 
+    def test_script_engine_shell_args_reach_the_replay(self) -> None:
+        """A shell-only browser-mode target runs its shell with [runner] args.
+
+        With no {PROFILE} there is no page route: the args say how the shell
+        consumes the testcase, as bin/probe and the audit's shell canary run it.
+        """
+        target, slug = self.make_target("shell-runner-args")
+        config = target / "target.toml"
+        contents = config.read_text(encoding="utf-8").replace(
+            "[sanitizer]", 'is_browser = "1"\n[sanitizer]', 1,
+        )
+        config.write_text(
+            contents + '\n[runner]\nargs = ["--wasm", "{TESTCASE}"]\n',
+            encoding="utf-8",
+        )
+
+        resolved = benchmark_runner._resolve_reverify_fields(
+            self.make_crash("shell-runner-args-crash"), target, slug,
+        )
+        self.assertIsNotNone(resolved)
+        fields, replay_args = resolved
+        self.assertEqual(replay_args, ["--wasm", fields["TESTCASE"]])
+
     def reproducing(self, original: str, runs: list[str]) -> int:
         return benchmark_runner._runs_reproducing(
             original, multi_run_transcript(runs),

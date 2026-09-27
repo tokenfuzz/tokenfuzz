@@ -8,19 +8,24 @@ Read only the strategy file you need, not all of them.
 - **Two-phase search:** Filename-only sweep first (`rg -l`), then inspect only the 2-3 most promising files with `rg -n` or `sed -n`.
 - **Scope every search:** Always scope with a directory path or `--glob`. Never search from `.` or scan `output/`.
 
-## Strategy Priority (8 active strategies + 1 pattern reference)
+## Strategy lanes (8 active strategies + 1 pattern reference)
 
-| Priority | Strategy | File | When |
-|----------|----------|------|------|
-| **1st** | **S1: Prior-fix + regression variant** | `S1-prior-fix-review.md` | Always first. 3/7 historical findings. Mines own fixes AND refactors. |
-| **2nd** | **S2: Invariant negation** | `S2-assert-negation.md` | Mechanical: asserts, algorithm assumptions, multi-precondition gates. |
-| **3rd** | **S3: Rule-vs-implementation** | `S3-spec-vs-impl.md` | LLM-native: trace a stated security, specification, or fast/slow-path rule to the exact code that must enforce it. Security-boundary cards start with access, identity/origin, credential/assertion, outbound-request, query/template, path, injection, deserialization, or external-entity decisions. |
-| **4th** | **S4: Boundary-directed fuzzing** | `S4-directed-fuzzing.md` | The only strategy that runs a fuzzer. Admit published, input-shape-compatible, undriven APIs; verify a product input route before fuzzing. |
-| **5th** | **S5: Lifetime & state violation** | `S5-reentrancy.md` | Re-entrancy, error-path cleanup, thread races, state machine sequences. |
-| **6th** | **S6: Cross-project variant mining** | `S6-cross-project.md` | Mine peer projects' fixes for bug classes in target. |
-| **7th** | **S7: Adversarial input** | `S7-adversarial-input.md` | Targeted parser/decoder boundary inputs, by hand. Fuzzing is S4. |
-| **8th** | **S8: Property-based oracles** | `S8-property-based.md` | Sanitizer-free oracles: idempotence, injectivity, numerical domain, format compliance, inverse operations. |
-| Ref | **REF: Pattern search library** | `REF-pattern-search.md` | Not a strategy — grep patterns for use alongside any strategy. |
+The harness assigns each agent a strategy lane, and every work card carries
+its strategy: follow the one you are given. S1 is the fallback lane: an
+agent starts on it only when no other lane has claimable cards, though
+rotation can move a dry agent there.
+
+| Strategy | File | When |
+|----------|------|------|
+| **S1: Prior-fix + regression variant** | `S1-prior-fix-review.md` | Fallback lane. Mines own fixes AND refactors. |
+| **S2: Invariant negation** | `S2-assert-negation.md` | Mechanical: asserts, algorithm assumptions, multi-precondition gates. |
+| **S3: Rule-vs-implementation** | `S3-spec-vs-impl.md` | LLM-native: trace a stated security, specification, or fast/slow-path rule to the exact code that must enforce it. Security-boundary cards start with access, identity/origin, credential/assertion, outbound-request, query/template, path, injection, deserialization, or external-entity decisions. |
+| **S4: Boundary-directed fuzzing** | `S4-directed-fuzzing.md` | The only strategy that runs a fuzzer. Admit published, input-shape-compatible, undriven APIs; verify a product input route before fuzzing. |
+| **S5: Lifetime & state violation** | `S5-reentrancy.md` | Re-entrancy, error-path cleanup, thread races, state machine sequences. |
+| **S6: Cross-project variant mining** | `S6-cross-project.md` | Mine peer projects' fixes for bug classes in target. |
+| **S7: Adversarial input** | `S7-adversarial-input.md` | Targeted parser/decoder boundary inputs, by hand. Fuzzing is S4. |
+| **S8: Property-based oracles** | `S8-property-based.md` | Sanitizer-free oracles: idempotence, injectivity, numerical domain, format compliance, inverse operations. |
+| **REF: Pattern search library** | `REF-pattern-search.md` | Not a strategy — grep patterns for use alongside any strategy. |
 
 **Rotation rule:** The harness may rotate strategy after sustained dry work, with a
 longer runway for S1 prior-fix review. Self-rotate only when the current strategy

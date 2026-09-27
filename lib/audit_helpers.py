@@ -130,11 +130,17 @@ def _cmd_relpath_list(args: argparse.Namespace) -> int:
 # ── sanitize-target-slug ───────────────────────────────────────────
 
 def sanitize_target_slug(raw: str, targets_root: str) -> str:
-    targets_real = os.path.realpath(targets_root)
-    raw_real = os.path.realpath(raw)
-    if raw_real == targets_real or raw_real.startswith(targets_real + os.sep):
-        relative = os.path.relpath(raw_real, targets_real)
-    else:
+    # The path as addressed first: bin/setup-target links a local source tree
+    # in as targets/<slug>, and the directory it points at may have any name.
+    relative = ""
+    for base, path in (
+        (os.path.abspath(targets_root), os.path.abspath(raw)),
+        (os.path.realpath(targets_root), os.path.realpath(raw)),
+    ):
+        if path == base or path.startswith(base + os.sep):
+            relative = os.path.relpath(path, base)
+            break
+    if not relative:
         relative = os.path.basename(raw.rstrip("/")) or raw
 
     parts = []

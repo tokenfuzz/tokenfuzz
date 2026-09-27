@@ -69,7 +69,7 @@ harness's harvester only looks under `${RESULTS_DIR}`.
 
 ```
 // TARGET: file:function:line
-// HYPOTHESIS-ID: Hn
+// HYPOTHESIS-ID: H-<id>
 // CATEGORY: bounds|lifetime|type|size|uninit|state
 // HARNESS: harness.c            (OPTIONAL — sibling harness source)
 ```

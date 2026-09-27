@@ -16,10 +16,13 @@ A "results dir" is a pool directory that contains findings/ and/or crashes/
     scope,item_type,item_id,canonical,score,band,primitive,surface,E,vector
 
 Run it on two checkouts (e.g. `git stash` the patch) and diff the CSVs to get a
-reproducible old→new comparison. Read-only: never writes into the results dirs.
+reproducible old→new comparison. Not read-only: each item is scored by
+`bin/severity --report`, which rewrites the report's severity fields and its
+severity.json, so run it on a copy or a finished tree, never a live audit.
 """
 from __future__ import annotations
 
+import argparse
 import json
 import re
 import subprocess
@@ -90,14 +93,23 @@ def _emit(pool: Path, scope: str) -> int:
 
 
 def main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="severity-sweep", description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("pools", nargs="*", type=Path, default=[],
+                        help="results pool directories holding findings/ and/or crashes/")
+    source.add_argument("--batch", type=Path,
+                        help="sweep every clustered pool under this directory")
+    args = parser.parse_args(argv)
     print("scope,item_type,item_id,canonical,score,band,primitive,surface,E,vector")
-    pools: list[Path] = []
-    if argv and argv[0] == "--batch":
-        root = Path(argv[1])
+    if args.batch is not None:
+        root = args.batch
         pools = sorted({p.parent.parent for p in root.rglob("findings/finding-clusters.md")}
                        | {p.parent.parent for p in root.rglob("crashes/crash-clusters.md")})
     else:
-        pools = [Path(a) for a in argv]
+        pools = args.pools
     for pool in pools:
         scope = str(pool).replace("output/benchmark/", "").replace("/pool", "")
         _emit(pool, scope)
