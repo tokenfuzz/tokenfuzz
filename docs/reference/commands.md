@@ -592,7 +592,7 @@ answer key. It launches nothing. Every shipped sample target has a
 | Flag | Meaning |
 | --- | --- |
 | `<dir>` | A `crashes/` directory, or a results or pool directory holding one. |
-| `--ground-truth <file>` | The target's `.ground-truth.json`. Required. |
+| `--ground-truth <file>` | The target's answer key, `output/<target>/.ground-truth.json` for a sample. Required. |
 | `--findings-dir <dir>` | Findings to score. Default: the `findings/` beside the crashes. |
 | `--members <file>` | A `pool-members.json`, for per-condition scores. |
 | `--conditions <list>` | Conditions that each get a row, even with zero crashes. |

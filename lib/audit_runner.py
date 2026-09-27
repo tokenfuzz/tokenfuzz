@@ -170,7 +170,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--target-path",
-        help="audit the source tree at this path instead of targets/<target>/; the output tree is named after its basename",
+        help=(
+            "audit the source tree at this path instead of targets/<target>/; "
+            "the output tree is named after the path below targets/, or after "
+            "its basename elsewhere"
+        ),
     )
     parser.add_argument(
         "--backend", choices=("all", "claude", "codex", "gemini", "grok", "oss"), default=None,
