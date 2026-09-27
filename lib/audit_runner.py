@@ -664,10 +664,7 @@ def validate_model(runtime: Runtime, audit_guide: str = "") -> None:
                 acted = sentinel.read_text(encoding="utf-8").strip() == token
             except OSError:
                 acted = False
-            unresolved_model = bool(
-                agy_log is not None and agy_log.is_file()
-                and "Failed to resolve model flag" in agy_log.read_text(encoding="utf-8", errors="replace")
-            )
+            unresolved_model = audit_helpers.agy_model_unresolved(agy_log)
             if unresolved_model:
                 # Its log is the only witness when agy falls back to its saved
                 # model: that launch exits 0 and even acts. Refused like any

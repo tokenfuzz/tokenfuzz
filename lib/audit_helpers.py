@@ -1033,11 +1033,6 @@ def _cmd_count_tools_all(args: argparse.Namespace) -> int:
 
 _RAW_STATUS_ERROR_TYPE_RE = re.compile(r'"type":"(?:error|turn\.failed)"')
 
-# Claude's dedicated provider-status field. It only ever carries a real backend
-# HTTP status, so it is trustworthy wherever it appears (it lives in the result
-# event, which also embeds model prose we must NOT scan for loose wording).
-_PROVIDER_API_ERROR_RE = re.compile(r'"api_error_status"[ \t]*:[ \t]*([0-9]{3})')
-
 # An HTTP status / error code. Trustworthy only inside a backend error event or
 # on a provider-CLI plain line — never in assistant prose or tool output, where
 # the model and target programs legitimately mention status codes.
@@ -1180,7 +1175,11 @@ def _status_class(match) -> str:
     down. 403 is deliberately absent — an edge proxy returns it for reasons that
     do clear — and 400 needs the wording check its caller applies.
     """
-    code = next((g for g in match.groups() if g), None)
+    return _code_class(next((g for g in match.groups() if g), None))
+
+
+def _code_class(code: str | None) -> str:
+    """The failure class of one HTTP status code; see `_status_class`."""
     if code == "429":
         return "capacity"
     if code == "401":
@@ -1269,26 +1268,24 @@ def _provider_issue_from_lines(
             ):
                 refused = True
 
-        # api_error_status is a dedicated field — trust it anywhere. Claude
-        # reports every API failure through it, including on a `result` event
-        # that no error-shaped rule below matches, so a refusal has to be read
-        # here or that backend's credential failure is invisible.
-        m = (
-            _PROVIDER_API_ERROR_RE.search(line)
-            if '"api_error_status"' in line else None
+        # Claude's top-level result field is authoritative. The same JSON
+        # line can contain tool input that quotes api_error_status or model
+        # errors, so never search the serialized event for either one.
+        api_status = (
+            event.get("api_error_status")
+            if event_type == "result" else None
         )
-        if m:
-            cls = _status_class(m)
+        if isinstance(api_status, int) and not isinstance(api_status, bool):
+            cls = _code_class(str(api_status))
             cap = cap or cls == "capacity"
             trans = trans or cls == "transient"
             refused = refused or cls == "refused"
-            if cls == "bad-request" and _PROVIDER_UNSERVABLE_TEXT_RE.search(line):
+            message = _event_error_text(event)
+            if cls == "bad-request" and _PROVIDER_UNSERVABLE_TEXT_RE.search(message):
                 refused = True
             # Claude answers an unknown model with a 404. Read in its message
             # field alone: the same line carries agent-written tool input.
-            if m.group(1) in ("400", "404") and event is not None and (
-                _PROVIDER_MODEL_UNSERVABLE_RE.search(_event_error_text(event))
-            ):
+            if api_status in (400, 404) and _PROVIDER_MODEL_UNSERVABLE_RE.search(message):
                 refused = True
 
         if is_error_event:
@@ -1370,7 +1367,7 @@ def _event_error_text(event: dict) -> str:
     """
     event_type = event.get("type")
     text = ""
-    if "api_error_status" in event:
+    if event_type == "result" and "api_error_status" in event:
         text = event.get("result") or event.get("error") or ""
     elif event_type in ("error", "turn.failed") or (
         event_type == "result" and event.get("status") == "error"
@@ -1382,6 +1379,14 @@ def _event_error_text(event: dict) -> str:
             error = error.get("message") or (
                 data.get("message") if isinstance(data, dict) else None
             )
+        if (
+            event_type == "result"
+            and isinstance(event.get("error"), dict)
+            and event["error"].get("type") == "FatalToolExecutionError"
+        ):
+            # Gemini CLI ends a session on a failed tool call with this same
+            # event; its message is the tool's failure, not the provider's.
+            return ""
         text = event.get("message") or error or ""
     if not isinstance(text, str):
         return ""
@@ -1497,6 +1502,23 @@ def unserved_model_error(lines, model: str, limit: int = 300) -> str:
         if name.search(text) and _UNSERVED_WORDING_RE.search(text)
     )
     return _bounded(named[0][2], limit) if named else ""
+
+
+# agy's log line when it cannot resolve --model. It then runs its saved model
+# and exits zero, so this line is the only witness.
+AGY_UNRESOLVED_MODEL = "Failed to resolve model flag"
+
+
+def agy_model_unresolved(log: Path | None) -> bool:
+    """Whether an agy log says it ran its saved model in place of --model."""
+    if log is None:
+        return False
+    try:
+        return AGY_UNRESOLVED_MODEL in Path(log).read_text(
+            encoding="utf-8", errors="replace",
+        )
+    except OSError:
+        return False
 
 
 def launch_failure(

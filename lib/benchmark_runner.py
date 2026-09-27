@@ -3482,15 +3482,26 @@ def check_model(backend: str, model: str, agent_security: str) -> str:
     other failure warns and starts, since each cell retries its own launch
     and a network blip here must not cost the run. A Codex CLI too old for
     the model is swapped for a newer one on PATH, as the audit preflight
-    does, and the swap reaches every cell. AUDIT_MODEL_PREFLIGHT=0 skips it.
+    does, and the swap reaches every cell. agy answers a model it cannot
+    resolve with its saved one and exits zero, so its log is read too: the
+    direct cell, which runs first, has no preflight of its own to catch it.
+    AUDIT_MODEL_PREFLIGHT=0 skips it.
     """
     if os.environ.get("AUDIT_MODEL_PREFLIGHT", "1") == "0":
         return ""
     llm_invoke.apply_memory_policy(False)
     scratch = Path(tempfile.mkdtemp(prefix="benchmark-model-check-"))
     raw = scratch / f"model-check-{backend}.raw"
+    agy_log = (
+        scratch / "model-check.agylog"
+        if backend == "gemini" and not llm_invoke.use_gemini_cli() else None
+    )
     upgraded = False
     while True:
+        prior_agy_log = os.environ.get("AGY_LOG_FILE")
+        if agy_log is not None:
+            # llm_invoke reads it to pass agy --log-file.
+            os.environ["AGY_LOG_FILE"] = str(agy_log)
         try:
             rc = llm_invoke.run_agent_prompt(
                 backend, "Reply with the single word OK.",
@@ -3500,6 +3511,18 @@ def check_model(backend: str, model: str, agent_security: str) -> str:
             )
         except (OSError, ValueError) as exc:
             return f"backend={backend} model={model} could not be launched: {exc}"
+        finally:
+            if agy_log is not None:
+                if prior_agy_log is None:
+                    os.environ.pop("AGY_LOG_FILE", None)
+                else:
+                    os.environ["AGY_LOG_FILE"] = prior_agy_log
+        if audit_helpers.agy_model_unresolved(agy_log):
+            return (
+                f"backend={backend} model={model} was refused before any cell "
+                "started: agy could not resolve --model and would run its saved "
+                f"model instead. Nothing was built or recorded. Log: {agy_log}"
+            )
         if rc == 0:
             shutil.rmtree(scratch, ignore_errors=True)
             return ""

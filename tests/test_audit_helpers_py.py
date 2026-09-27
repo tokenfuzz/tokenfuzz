@@ -769,7 +769,7 @@ provider_cases = [
         [{"type": "result", "is_error": True, "api_error_status": 400,
           "result": "prompt is too long",
           "permission_denials": [{"tool_input": {
-              "query": "sample model loader. Error: file not found"}}]}],
+              "query": "model file not found"}}]}],
         "none",
         "provider-issue: agent tool input beside a claude API error is not the provider",
     ),
@@ -957,6 +957,30 @@ with tempfile.TemporaryDirectory() as launch_dir:
             "sample-modl-1",
         ),
         "unserved-model: a CLI's own advisory item is not a refusal",
+    )
+    tool_failure = Path(launch_dir) / "tool-failure.raw"
+    # Gemini CLI ends a session on a failed tool call with the same event it
+    # uses for API errors; only the structured error type tells them apart.
+    tool_failure.write_text(json.dumps({
+        "type": "result", "status": "error", "error": {
+            "type": "FatalToolExecutionError", "message":
+            "Error executing tool read_file: model sample-modl-1 metadata "
+            "missing; /tmp/input.json not found"},
+    }) + "\n", encoding="utf-8")
+    assert_eq(
+        ("none", ""), audit_helpers.launch_failure(tool_failure, "sample-modl-1"),
+        "launch-failure: a terminal tool error is not a model refusal",
+    )
+    auth_failure = Path(launch_dir) / "auth-failure.raw"
+    auth_failure.write_text(json.dumps({
+        "type": "result", "status": "error", "error": {
+            "type": "FatalAuthenticationError",
+            "message": "Please set an Auth method"},
+    }) + "\n", encoding="utf-8")
+    assert_eq(
+        "Please set an Auth method",
+        audit_helpers.launch_failure(auth_failure, "sample-modl-1")[1],
+        "launch-failure: a Gemini fatal error other than a tool's is still quoted",
     )
 
 

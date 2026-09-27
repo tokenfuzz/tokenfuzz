@@ -120,9 +120,10 @@ model name it does not serve (often a typo in `--model`), an expired login,
 no access to that model, or a safeguard refusal. Fix the name, or log in
 again and confirm the account can use the model. The harness stops after
 the first refusal instead of retrying. On every backend, a failed launch
-whose error names the requested model and says it is not found, unknown,
-or not supported counts as a refusal, whatever the rest of the CLI's
-wording. A safeguard refusal also logs `WARN: MODEL_REFUSAL`, with the
+whose provider error names the requested model and says it is not found,
+unknown, or not supported counts as a refusal, whatever the rest of the
+CLI's wording. A tool's own error, such as a missing file, is never read as
+one. A safeguard refusal also logs `WARN: MODEL_REFUSAL`, with the
 category when the provider gives one
 (`WARN: MODEL_REFUSAL: CYBER CLASSIFIER DETECTED backend=<name> provider_reason=<reason>`);
 treat that as an access question, as above.

@@ -632,6 +632,30 @@ class BenchmarkCliTests(unittest.TestCase):
             self.assertIn("starting anyway", output)
             self.assertIn(said, output)
 
+    def test_model_check_refuses_an_agy_fallback_that_exits_zero(self) -> None:
+        # agy runs its saved model when it cannot resolve --model and still
+        # exits zero; only its log says so, and every cell would measure the
+        # wrong model for the whole wall.
+        def launch(_backend, _prompt, _timeout, raw_log, **_kwargs):
+            Path(raw_log).write_text("OK\n", encoding="utf-8")
+            Path(os.environ["AGY_LOG_FILE"]).write_text(
+                "Failed to resolve model flag\n", encoding="utf-8",
+            )
+            return 0
+
+        with mock.patch.dict(os.environ, {
+            "AUDIT_MODEL_PREFLIGHT": "1", "USE_GEMINI_CLI": "0",
+        }), mock.patch.object(
+            benchmark_runner.llm_invoke, "run_agent_prompt", side_effect=launch,
+        ):
+            os.environ.pop("AGY_LOG_FILE", None)
+            message = benchmark_runner.check_model(
+                "gemini", "sample-modl-1", "sandboxed",
+            )
+            self.assertNotIn("AGY_LOG_FILE", os.environ)
+        self.assertIn("was refused before any cell started", message)
+        self.assertIn("agy could not resolve --model", message)
+
     def test_model_check_upgrades_a_codex_too_old_for_the_model(self) -> None:
         # The audit preflight already swaps in a newer codex on PATH; the
         # benchmark check must not refuse what that swap recovers.

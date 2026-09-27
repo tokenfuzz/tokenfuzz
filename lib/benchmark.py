@@ -6402,7 +6402,13 @@ def render_section(report: dict) -> str:
     lines.append("### Verdict")
     lines.append("")
     held_direct = bool(run.get("model_direct_hold"))
-    lines.append(_verdict_line(clusters, backend, model, held_direct))
+    if not any(c.get("replicates_done", 0) for c in conditions):
+        lines.append(
+            "No benchmark cell finished; yield was not measured. Fix the "
+            "cell failure and resume this run."
+        )
+    else:
+        lines.append(_verdict_line(clusters, backend, model, held_direct))
     lines.append("")
 
     # ── Scoreboard ───────────────────────────────────────────────────────
@@ -8051,6 +8057,12 @@ def _cmd_report_summary(args: argparse.Namespace) -> int:
         print("  (no report.json)")
         return 0
     for condition in report.get("conditions", []):
+        if not condition.get("replicates_done"):
+            print(
+                f"  {condition['condition']:<18} done=0/"
+                f"{condition['replicates_total']}  not measured"
+            )
+            continue
         crashes = condition.get("crashes", [])
         spread = f"{min(crashes)}-{max(crashes)}" if crashes else "-"
         print(

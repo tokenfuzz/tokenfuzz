@@ -3437,6 +3437,23 @@ class BenchmarkWallBudgetTests(unittest.TestCase):
         self.assertGreaterEqual(rendered.count("`gpt-test-direct-held`"), 4)
         self.assertNotIn("`gpt-test-direct`", rendered)
 
+    def test_all_failed_cells_do_not_claim_a_zero_yield(self) -> None:
+        report = {
+            "run": {
+                "runid": "unmeasured", "target": "sampleproj", "backend": "codex",
+                "model": "sample-modl-1", "replicates": 1, "budget_wall": 60,
+            },
+            "conditions": [{
+                "condition": "harness", "replicates_done": 0,
+                "replicates_total": 1,
+            }],
+            "crash_clusters": [],
+        }
+        rendered = benchmark.render_section(report)
+        self.assertIn("yield was not measured", rendered)
+        self.assertIn("0/1", rendered)
+        self.assertNotIn("Choose a target the harness can crack", rendered)
+
 
 if __name__ == "__main__":
     unittest.main()
