@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import shutil
 import sys
 import tempfile
@@ -145,6 +147,62 @@ class CompiledTargetUnitsTests(unittest.TestCase):
             scan.assert_not_called()
         driver.write_text("int main() { return 0; }\n")
         self.assertEqual(build_scope.compiled_target_units(driver, self.target), [])
+
+    def cxx_only_header(self) -> None:
+        # A C++ API header that refuses a C compile, as real ones do.
+        (self.target / "sample.hpp").write_text(
+            "#ifndef __cplusplus\n#error sample.hpp must be compiled as C++\n#endif\n"
+            "namespace app { int parse(const char *); }\n",
+        )
+
+    @unittest.skipUnless(_clang_available(), "no clang for the dependency scan")
+    def test_cxx_driver_saved_as_c_is_scanned_as_cxx(self) -> None:
+        # A model-direct recipe once named every driver harness.c, and the
+        # model built its C++ API driver with clang++: the scan failed as C.
+        self.cxx_only_header()
+        driver = self.driver(
+            '#include "sample.hpp"\n#include "src/extra.c"\n'
+            "int main() { return app::parse(nullptr) + extra(); }\n",
+        )
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            units = build_scope.compiled_target_units(driver, self.target)
+        self.assertEqual(units, [Path("src/extra.c")])
+        self.assertEqual(stderr.getvalue(), "")
+
+    @unittest.skipUnless(_clang_available(), "no clang for the language check")
+    def test_driver_language_trusts_the_suffix_until_the_compiler_disagrees(self) -> None:
+        self.cxx_only_header()
+        flags = [f"-I{self.target}"]
+        both = self.driver('#include "sample.h"\nint main(void) { return app_parse("x"); }\n')
+        self.assertEqual(build_scope.driver_language(both, flags), "c")
+        # A C++ target's configured standard must not fail the C parse.
+        self.assertEqual(build_scope.driver_language(both, [*flags, "-std=c++17"]), "c")
+        cxx = self.driver('#include "sample.hpp"\nint main() { return app::parse(nullptr); }\n')
+        self.assertEqual(build_scope.driver_language(cxx, flags), "c++")
+        # A C++ parse keeps the target's own standard.
+        cxx20 = self.driver(
+            '#include "sample.hpp"\nconsteval int one() { return 1; }\n'
+            "int main() { return app::parse(nullptr) - one() + 1; }\n",
+        )
+        self.assertEqual(build_scope.driver_language(cxx20, [*flags, "-std=c++20"]), "c++")
+        neither = self.driver('#include "only_in_the_build.h"\nint main(void) { return 0; }\n')
+        self.assertEqual(build_scope.driver_language(neither, flags), "c")
+        with mock.patch.object(build_scope.timeout, "run_timeout") as compile_:
+            self.assertEqual(
+                build_scope.driver_language(self.driver("", name="harness.cpp"), flags), "c++",
+            )
+            compile_.assert_not_called()
+
+    @unittest.skipUnless(_clang_available(), "no clang for the dependency scan")
+    def test_failed_scan_names_the_compiler_error_not_the_include_chain(self) -> None:
+        (self.target / "broken.h").write_text("#error broken generated header\n")
+        driver = self.driver('#include "broken.h"\nint main(void) { return 0; }\n')
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            self.assertIsNone(build_scope.compiled_target_units(driver, self.target))
+        self.assertIn("error: broken generated header", stderr.getvalue())
+        self.assertNotIn("In file included from", stderr.getvalue())
 
     def test_configured_include_dirs_come_from_the_session_snapshot(self) -> None:
         results = self.crash.parent.parent

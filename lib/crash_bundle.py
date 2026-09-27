@@ -16,6 +16,11 @@ from typing import Collection, Sequence
 import crash_artifacts
 import stack_frames
 
+#: bin/export-repro's exit status when the crash's own reproducer bytes (its
+#: driver or testcase) name an audit-private path. Export keeps those bytes
+#: verbatim, so no rerun can build the bundle, unlike its ordinary exit 1.
+UNEXPORTABLE_EXIT = 3
+
 
 def should_file(verdict: str, sanitizer: str, runs: int) -> bool:
     return verdict == "CRASH" and sanitizer != "runner" and runs >= 2

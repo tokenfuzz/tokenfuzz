@@ -306,6 +306,11 @@ class BenchmarkReportTests(unittest.TestCase):
             # gate reruns that binary, and a source-only bundle left every
             # API-level crash in the direct condition unadjudicated.
             "`/abs/out/crashes/CRASH-<n>/harness`",
+            # The suffix is the driver's language for every later compile: a
+            # C++ API driver saved as harness.c left its crashes unexportable.
+            "API is `harness.cpp`, built with `clang++` in place of `clang`;",
+            # Export cannot carry an audit path baked into the driver.
+            "reruns your driver passes the input as an argument. Bake in no",
         ):
             self.assertIn(required, native_body)
         # The discouragement that suppressed the crash lane is gone from every

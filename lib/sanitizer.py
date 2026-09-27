@@ -48,6 +48,32 @@ SYMBOLIZE_TIMEOUT_MARKER_ENV = "_TOKENFUZZ_SYMBOLIZE_TIMEOUT_MARKER"
 
 RAW_FRAME = re.compile(
     r"^ *#[0-9]+ +0x[0-9a-f]+ +(?:in +.*? +)?\([^)]*\+0x[0-9a-f]+\)", re.M)
+# The module path in a raw frame's trailer: `(/path/lib.dylib:arm64+0x84f30)`.
+_RAW_FRAME_MODULE = re.compile(r"\(([^()]+?)(?::[A-Za-z0-9_]+)?\+0x[0-9a-f]+\)\s*$")
+
+
+# macOS's sealed system locations. A library named there that is not on disk
+# lives only in the dyld shared cache.
+_SHARED_CACHE_PREFIXES = ("/usr/lib/", "/System/Library/")
+
+
+def has_resolvable_raw_frame(text: str) -> bool:
+    """Whether a report keeps a raw frame that should carry a source line.
+
+    macOS system libraries live only in the dyld shared cache, so no file
+    backs their frames and they stay raw after every pass; counting them
+    warned on every such report and paid the symbolizer again on each call.
+    Every other missing module still counts: a deleted build or a moved
+    driver binary is exactly what the warning exists to surface.
+    """
+    for line in text.splitlines():
+        if not RAW_FRAME.match(line):
+            continue
+        match = _RAW_FRAME_MODULE.search(line)
+        module = match.group(1) if match else ""
+        if not (module.startswith(_SHARED_CACHE_PREFIXES) and not os.path.isfile(module)):
+            return True
+    return False
 
 
 def build_dir(name: str, target_root: str = "", env: Mapping[str, str] | None = None) -> Path:
@@ -235,7 +261,8 @@ def symbolize_file(
     ``full_path`` asks the platform symbolizer for full source paths; coverage
     journals need them, crash reports keep the basenames their signatures use.
 
-    Returns whether the report is free of unsymbolized frames afterwards. A
+    Returns whether the report is free of frames a symbolizer could still
+    resolve (see ``has_resolvable_raw_frame``) afterwards. A
     failure is never fatal — the raw report is still evidence — but it must not
     be silent: this returned quietly when the symbolizer could not start, and a
     whole benchmark run shipped address-only stacks while reporting itself
@@ -250,7 +277,7 @@ def symbolize_file(
     if not report.is_file() or not report.stat().st_size or not SYMBOLIZER.is_file():
         return False
     raw = report.read_text(errors="replace")
-    if not RAW_FRAME.search(raw):
+    if not has_resolvable_raw_frame(raw):
         return True
     marker = os.environ.get(SYMBOLIZE_TIMEOUT_MARKER_ENV, "")
     if marker and os.path.exists(marker):
@@ -293,16 +320,12 @@ def symbolize_file(
         staged = report.with_name(f"{report.name}.symbolized")
         staged.write_bytes(Path(rendered.name).read_bytes())
         os.replace(staged, report)
-    if RAW_FRAME.search(report.read_text(errors="replace")):
+    if has_resolvable_raw_frame(report.read_text(errors="replace")):
         # The symbolizer ran and answered, and frames still carry no source
         # location: a stripped build, a moved binary, or a debug-info mismatch.
         _warn_unsymbolized(report, None)
         return False
     return True
-
-
-# The module path in a raw frame's trailer: `(/path/lib.dylib:arm64+0x84f30)`.
-_RAW_FRAME_MODULE = re.compile(r"\(([^()]+?)(?::[A-Za-z0-9_]+)?\+0x[0-9a-f]+\)\s*$")
 
 
 def symbolized_cache_path(raw: bytes, cache_dir: Path) -> Path:
@@ -328,7 +351,7 @@ def symbolized_copy(
     """
     raw = report.read_bytes()
     text = raw.decode(errors="replace")
-    if not RAW_FRAME.search(text):
+    if not has_resolvable_raw_frame(text):
         return report
     cached = symbolized_cache_path(raw, cache_dir)
     if cached.is_file():

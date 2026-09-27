@@ -2535,7 +2535,7 @@ def pool_reports_missing_symbols(pool: Path) -> bool:
     nothing to symbolize does not report a problem it does not have.
     """
     return any(
-        sanitizer_lib.RAW_FRAME.search(report.read_text(errors="replace"))
+        sanitizer_lib.has_resolvable_raw_frame(report.read_text(errors="replace"))
         for reports in _pool_diagnostics(pool).values()
         for report in reports
     )

@@ -50,9 +50,10 @@ append a `## Triage disposition` note to the report:
   testcase moves to `crashes/`; without the testcase it stays a finding
   with a `.crash-lead.json` marker.
 - A CRASH with no memory-safety signal (a language-runtime error, or an
-  undefined-behaviour class that is not memory safety), or whose harness
-  compiles target source instead of linking the pinned build, moves to
-  `findings/` for good.
+  undefined-behaviour class that is not memory safety), whose harness
+  compiles target source instead of linking the pinned build, or whose
+  harness or testcase names an audit-private path that no maintainer bundle
+  can carry, moves to `findings/` for good.
 - A memory-safety FIND at the exact source line of a filed crash moves under
   it as `.companion/<FIND-id>/` and follows its verdict; a crash bundle that
   duplicates a reportable one moves to `crashes/.duplicates/` (see
@@ -95,6 +96,9 @@ first gates and then meet the same source review.
    that compiles target source, moves the artifact to `findings/`.
 5. **Export and fields.** `bin/export-repro` builds the maintainer bundle,
    and a model fills missing [structured fields](#structured-report-fields).
+   A failed export prints its reason and leaves the crash pending, except
+   a harness or testcase that names an audit-private path: export keeps
+   those bytes verbatim, so that crash moves to `findings/`.
    A report with neither `Caller contract` nor `Trigger source` stays
    pending and ages out like an incomplete bundle.
 6. **Source review** (below). A crash that `bin/probe --confirm` reproduced

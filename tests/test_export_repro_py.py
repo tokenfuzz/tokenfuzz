@@ -1557,6 +1557,7 @@ assert_eq("harness.cpp", found_cpp.name if found_cpp else "",
 # never ran. A receipt that no longer holds must stop the export, not hand the
 # decision back to that guess.
 import crash_bundle as _cb
+import sanitizer as _cb_sanitizer
 
 receipt_root = TMP / "receipt-export"
 receipt_results = receipt_root / "results"
@@ -2168,6 +2169,40 @@ if (context_crash / "reproduce.sh").exists():
     assert_in('cmake -S "$src" -B "$build"', context_script,
               "absolute crash path selects its pinned build system")
 
+# A C++ driver saved as harness.c (a model's own build line compiled it with
+# clang++) must be bundled as C++, or reproduce.sh compiles it as C and fails.
+cxx_crash = crash_dir.parent / "CRASH-CXX-1"
+cxx_crash.mkdir()
+(cxx_crash / "sanitizer.txt").write_bytes((crash_dir / "sanitizer.txt").read_bytes())
+(cxx_crash / "report.md").write_text(
+    "# CRASH-CXX-1\n\n## Summary\nTest crash.\n\n"
+    "Trigger source: bytes\nBoundary: input file\nCaller controls: bytes\n"
+    "Caller contract: obeyed\n", encoding="utf-8",
+)
+(cxx_crash / "input.bin").write_bytes(b"ABC")
+(cxx_crash / "harness.c").write_text(
+    "namespace app { int parse(const char *); }\n"
+    "int main(int argc, char **argv) { return argc > 1 ? app::parse(argv[1]) : 0; }\n",
+    encoding="utf-8",
+)
+if shutil.which(_cb_sanitizer.llvm_tool("clang")) and shutil.which(_cb_sanitizer.llvm_tool("clang++")):
+    cxx_export = subprocess.run(
+        [str(ROOT / "bin" / "export-repro"), "CRASH-CXX-1"],
+        capture_output=True, text=True, env=env, cwd=output_root,
+    )
+    assert_eq(0, cxx_export.returncode,
+              f"export-repro bundles a C++ driver saved as .c: {cxx_export.stderr}")
+    cxx_script = (cxx_crash / "reproduce.sh").read_text(encoding="utf-8")
+    assert_eq(True, (cxx_crash / "harness.cpp").is_file(),
+              "a C++ driver saved as .c is staged as harness.cpp")
+    assert_in('clang++ -fsanitize=address', cxx_script,
+              "reproduce.sh compiles the C++ driver with clang++")
+    assert_in('"$here/harness.cpp"', cxx_script, "reproduce.sh compiles harness.cpp")
+    assert_eq(False, (cxx_crash / "harness.c").exists(),
+              "the stale harness.c leaves the bundle root, so discovery cannot pick it")
+    assert_eq(True, (cxx_crash / ".audit" / "harness.c").is_file(),
+              "the driver as written is kept under .audit")
+
 # A source literal containing the audit build path must not be rewritten into
 # a different executable path. Reject it so the author can make the harness
 # resolve the rebuilt binary at runtime.
@@ -2189,10 +2224,11 @@ path_export = subprocess.run(
     [str(ROOT / "bin" / "export-repro"), "CRASH-PATH-1"],
     capture_output=True, text=True, env=env, cwd=output_root,
 )
-assert_eq(1, path_export.returncode,
-          "export-repro rejects a harness whose executable path cannot be ported safely")
-assert_in("internal refs leaked", path_export.stderr,
-          "export-repro names the unportable source")
+assert_eq(_cb.UNEXPORTABLE_EXIT, path_export.returncode,
+          "export-repro refuses, as unexportable, a harness whose executable "
+          "path cannot be ported safely")
+assert_in("internal refs leaked into: harness.c;", path_export.stderr,
+          "export-repro names the unportable source by its bundle name")
 assert_in(literal, (path_crash / "harness.c").read_text(encoding="utf-8"),
           "export-repro preserves the harness path literal for repair")
 unsafe_env = {**env, "EXPORT_REPRO_ALLOW_INTERNAL_REFS": "1"}
@@ -2200,7 +2236,7 @@ unsafe_export = subprocess.run(
     [str(ROOT / "bin" / "export-repro"), "CRASH-PATH-1"],
     capture_output=True, text=True, env=unsafe_env, cwd=output_root,
 )
-assert_eq(1, unsafe_export.returncode,
+assert_eq(_cb.UNEXPORTABLE_EXIT, unsafe_export.returncode,
           "an environment variable cannot bypass the maintainer bundle path guard")
 assert_eq(False, (path_crash / "reproduce.sh").exists(),
           "a failed portability check leaves no misleading replay script")
@@ -2218,8 +2254,9 @@ input_path_export = subprocess.run(
     [str(ROOT / "bin" / "export-repro"), "CRASH-INPUT-PATH-1"],
     capture_output=True, text=True, env=env, cwd=output_root,
 )
-assert_eq(1, input_path_export.returncode,
-          "export-repro rejects an audit path inside exact testcase bytes")
+assert_eq(_cb.UNEXPORTABLE_EXIT, input_path_export.returncode,
+          "export-repro refuses, as unexportable, an audit path inside exact "
+          "testcase bytes")
 assert_in(literal, (input_path_crash / "input.txt").read_text(encoding="utf-8"),
           "export-repro preserves exact testcase bytes for repair")
 

@@ -195,5 +195,53 @@ class ExportTitleTests(unittest.TestCase):
             self.assertEqual(crash_bundle.bundle_crash_state(crash), filed_state)
 
 
+class UnresolvableFrameTests(unittest.TestCase):
+    """A frame in a module no file backs cannot be symbolized by anything."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory(prefix="report-unresolvable-")
+        self.root = Path(self._tmp.name)
+        self.module = self.root / "libsample.dylib"
+        self.module.write_bytes(b"\0")
+        # macOS keeps system libraries only in the dyld shared cache.
+        self.cached = Path("/usr/lib/system/libdispatch.dylib")
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def frame(self, module: str) -> str:
+        return f"    #4 0x00018d3ad4c4 ({module}:arm64e+0x1b4c4)\n"
+
+    def test_only_a_shared_cache_library_is_exempt(self) -> None:
+        if self.cached.is_file():
+            self.skipTest("this host keeps the system library on disk")
+        self.assertFalse(sanitizer.has_resolvable_raw_frame(self.frame(str(self.cached))))
+        self.assertTrue(sanitizer.has_resolvable_raw_frame(self.frame(str(self.module))))
+        # A deleted build or a moved driver binary is what the warning is for.
+        self.assertTrue(sanitizer.has_resolvable_raw_frame(
+            self.frame(str(self.root / "build-asan" / "libgone.dylib")),
+        ))
+        # A bare module name says nothing about where it lives.
+        self.assertTrue(sanitizer.has_resolvable_raw_frame(self.frame("libsample.so")))
+        self.assertFalse(sanitizer.has_resolvable_raw_frame(
+            "    #0 0x1000 in app_parse child.c:91\n",
+        ))
+
+    def test_report_with_only_unresolvable_frames_is_left_alone_quietly(self) -> None:
+        if self.cached.is_file():
+            self.skipTest("this host keeps the system library on disk")
+        report = self.root / "sanitizer.txt"
+        text = "    #0 0x1000 in app_parse child.c:91\n" + self.frame(str(self.cached))
+        report.write_text(text)
+        stderr = io.StringIO()
+        with mock.patch.object(sanitizer.subprocess, "run") as run, \
+                contextlib.redirect_stderr(stderr):
+            self.assertTrue(sanitizer.symbolize_file(report))
+        run.assert_not_called()
+        self.assertEqual(stderr.getvalue(), "")
+        self.assertEqual(report.read_text(), text)
+        self.assertEqual(sanitizer.symbolized_copy(report, self.root / ".audit"), report)
+
+
 if __name__ == "__main__":
     unittest.main()

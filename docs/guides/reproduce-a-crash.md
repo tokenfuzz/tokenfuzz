@@ -129,8 +129,8 @@ does not show that the crash reproduces.
 5. **Exits with the replayed run's status**, after printing
    `[repro] exit=<status>` on stderr.
 
-Before the replay it prints `=== compiling harness: harness.c ===` for a
-harness bundle and `=== running ASan repro: <input> ===` (with the bundle's
+Before the replay it prints `=== compiling harness: harness.c ===` (or
+`harness.cpp`, compiled with `clang++`, for a C++ driver) for a harness bundle and `=== running ASan repro: <input> ===` (with the bundle's
 sanitizer name). A failing build step stops the script under `set -eu`
 with no `[repro]` line. A bundle whose route was an audit-side shell
 wrapper runs that wrapper instead, prints neither line, and exits with the

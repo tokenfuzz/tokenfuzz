@@ -15,6 +15,8 @@ lists every user file the preprocessor actually opened, following the include
 directories and conditional includes the driver really uses, and ``-MG`` keeps
 the listing going past a header the scan cannot find (a generated one, or one
 behind an include directory only the discovery build knew).
+
+The driver's language is the compile's own: see ``driver_language``.
 """
 
 from __future__ import annotations
@@ -24,6 +26,7 @@ import json
 import re
 import sys
 from pathlib import Path
+from typing import Sequence
 
 import sanitizer
 import timeout
@@ -32,7 +35,9 @@ import timeout
 # these compiles a translation unit. Headers, however large, are the
 # interface the pinned build also exposes.
 TARGET_UNIT_SUFFIXES = frozenset({".c", ".cc", ".cpp", ".cxx", ".m", ".mm"})
-_CXX_SUFFIXES = frozenset({".cc", ".cpp", ".cxx", ".mm"})
+# Suffixes clang compiles as C++ (`.C` is case-sensitive, so it is checked
+# apart from these lowercase ones).
+CXX_SUFFIXES = frozenset({".cc", ".cpp", ".cxx", ".c++", ".mm"})
 SCAN_SECONDS = 60
 # The scan's answer for one driver, beside it. Triage revisits a pending
 # crash every pass; the answer changes only when the driver's bytes do.
@@ -71,13 +76,13 @@ def compiled_target_units(
             return [Path(unit) for unit in cached["units"]]
     except (OSError, ValueError, KeyError, TypeError):
         pass
-    compiler = sanitizer.llvm_tool(
-        "clang++" if driver.suffix.lower() in _CXX_SUFFIXES else "clang",
-    )
+    include_flags = [f"-I{directory}" for directory in (root, *include_dirs)]
+    cxx = driver_language(driver, include_flags) == "c++"
     command = [
-        compiler, "-MM", "-MG",
-        *(f"-I{directory}" for directory in (root, *include_dirs)),
-        str(driver),
+        sanitizer.llvm_tool("clang++" if cxx else "clang"),
+        # clang reads the language off every other suffix itself.
+        *(("-x", "c++") if cxx and driver.suffix == ".c" else ()),
+        "-MM", "-MG", *include_flags, str(driver),
     ]
     try:
         completed = timeout.run_timeout(
@@ -91,10 +96,9 @@ def compiled_target_units(
         )
         return None
     if completed.returncode != 0:
-        detail = (completed.stderr or completed.stdout or "").strip().splitlines()
         print(
             f"WARN: build-scope scan of {driver} failed (rc={completed.returncode}): "
-            f"{detail[0] if detail else 'no diagnostic'}",
+            f"{first_error(completed.stderr or completed.stdout)}",
             file=sys.stderr,
         )
         return None
@@ -141,3 +145,52 @@ def _place(token: Path, bases: tuple[Path, ...]) -> Path | None:
             continue
     return None
 
+
+def driver_language(driver: Path, flags: Sequence[str] = ()) -> str:
+    """The language a C-family driver compiles as: ``"c"`` or ``"c++"``.
+
+    The suffix decides, as it does for bin/probe, except for a ``.c`` file
+    whose body is C++: model-direct drivers are built by the model's own
+    command line, so nothing enforced the suffix, and a C++ API driver saved
+    as ``harness.c`` built with ``clang++``. Such a file is C++ only when the
+    compiler rejects it as C and accepts it as C++ under the same flags; a
+    driver neither accepts (a header only the discovery build could find)
+    keeps its suffix, so this never guesses. Each parse drops the other
+    language's ``-std=``: a C++ target's configured ``-std=c++17`` would fail
+    every C parse, while a C++ parse keeps it.
+    """
+    driver = Path(driver)
+    if driver.suffix == ".C" or driver.suffix.lower() in CXX_SUFFIXES:
+        return "c++"
+    if driver.suffix.lower() != ".c":
+        return "c"
+
+    def parses(language: str) -> bool:
+        command = [
+            sanitizer.llvm_tool("clang++" if language == "c++" else "clang"),
+            "-x", language, "-fsyntax-only",
+            *(
+                flag for flag in flags
+                if not flag.startswith("-std=") or ("++" in flag) == (language == "c++")
+            ),
+            str(driver),
+        ]
+        try:
+            completed = timeout.run_timeout(
+                command, SCAN_SECONDS, cwd=str(driver.parent),
+                capture_output=True, text=True,
+            )
+        except OSError:
+            return False
+        return completed.returncode == 0
+
+    return "c++" if not parses("c") and parses("c++") else "c"
+
+
+def first_error(output: str | None) -> str:
+    """The compiler's first ``error:`` line, not its include-chain preamble."""
+    lines = (output or "").strip().splitlines()
+    return next(
+        (line.strip() for line in lines if "error:" in line),
+        lines[0].strip() if lines else "no diagnostic",
+    )

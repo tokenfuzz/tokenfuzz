@@ -42,6 +42,7 @@ sys.path.insert(0, str(SCRIPT_ROOT / "lib"))
 import strategies  # noqa: E402
 import cli_help  # noqa: E402
 
+import build_scope  # noqa: E402
 import crash_artifacts  # noqa: E402  (runtime sys.path adjustment)
 import crash_bundle  # noqa: E402
 import report_identity  # noqa: E402
@@ -53,9 +54,9 @@ import target_config  # noqa: E402  (runtime sys.path adjustment)
 import validation_receipt  # noqa: E402
 
 
-def die(msg: str) -> None:
+def die(msg: str, status: int = 1) -> None:
     sys.stderr.write(f"[export-repro] {msg}\n")
-    sys.exit(1)
+    sys.exit(status)
 
 
 def usage() -> None:
@@ -3590,9 +3591,19 @@ def main(argv: list[str]) -> int:
         harness_name = "harness.c"
         harness_compiler = "clang"
         if harness_src is not None:
-            suffix = harness_src.suffix.lower()
-            if suffix in {".cc", ".cpp", ".cxx"}:
-                harness_name = "harness" + suffix
+            # The reproducer compiles the driver the way it was built: a C++
+            # driver saved as `.c` is staged as `harness.cpp`, or clang would
+            # read it as C and the bundle would not build.
+            language_flags = [
+                f"-I{path}" for path in (
+                    cfg.target_root, *(cfg.resolve_path(i) for i in cfg.includes if i),
+                )
+            ] + list(cfg.defines)
+            if build_scope.driver_language(harness_src, language_flags) == "c++":
+                suffix = harness_src.suffix.lower()
+                harness_name = "harness" + (
+                    suffix if suffix in build_scope.CXX_SUFFIXES else ".cpp"
+                )
                 harness_compiler = "clang++"
             harness_text = strip_internal_headers(harness_src)
             harness_text = rewrite_harness_repo_paths(harness_text)
@@ -3999,10 +4010,21 @@ def main(argv: list[str]) -> int:
             except OSError:
                 continue
             if _bundle_text_has_internal_ref(txt, cfg):
-                leaked.append(str(f))
+                leaked.append(f)
         if leaked:
-            msg = f"internal refs leaked into: {' '.join(leaked)}"
-            die(f"{msg}; repair the testcase or harness before export")
+            die(
+                "internal refs leaked into: " + " ".join(
+                    # Name the file to repair, not its staged bundle name.
+                    harness_src.name
+                    if harness_src is not None and f.name == harness_name else f.name
+                    for f in leaked
+                ) + "; "
+                "repair the testcase or harness before export",
+                # Only the reproducer's own bytes make the crash unexportable;
+                # a leak in the prose or script export writes is its own defect.
+                crash_bundle.UNEXPORTABLE_EXIT
+                if not set(leaked) & set(normalize_candidates) else 1,
+            )
 
         # ── Migrate junk into .audit/ ────────────────────────────────
         if out_dir == crash_dir:
@@ -4025,6 +4047,12 @@ def main(argv: list[str]) -> int:
                 # confuse the user about which file reproduce.sh runs.
                 if base.startswith("input."):
                     if input_name and base == input_name:
+                        continue
+                elif harness_src is not None and base.startswith("harness."):
+                    # Likewise only the staged driver: a C++ driver saved as
+                    # harness.c installs as harness.cpp, and the stale name
+                    # must not stay beside it for discovery to pick.
+                    if base == harness_name or not f.is_file():
                         continue
                 else:
                     if _is_bundle_filename(base):

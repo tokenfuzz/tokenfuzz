@@ -29,6 +29,7 @@ import audit_helpers
 import audit_runner
 import benchmark
 import benchmark_runner
+import crash_bundle
 import gemini_watchdog
 import llm_invoke
 import process_tree
@@ -728,6 +729,70 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
     check(
         (bundle / ".promotion_pending.sig").read_text().startswith("bundle:"),
         "bundle failure uses an independent TTL signature",
+    )
+
+    # Export refusing the reproducer's own bytes is permanent: no pass can
+    # build the bundle, so the crash becomes a finding, not a pending
+    # artifact that ages into a rejection.
+    refused_root = root / "bundle-refused"
+    (refused_root / "crashes-rejected").mkdir(parents=True)
+    refused = _crash_dir(
+        refused_root, "CRASH-027", report=_GOOD_REPORT,
+        sanitizer=_ASAN, testcase=True,
+    )
+    with mock.patch.object(
+        triage, "_run_tool", return_value=crash_bundle.UNEXPORTABLE_EXIT,
+    ):
+        refused_status = triage.triage_one_crash(
+            refused, refused_root, root, "sampleproj", ["bytes"]
+        )
+    demoted = refused_root / "findings" / "FIND-027"
+    check(refused_status == "demoted", "unexportable reproducer demotes the crash", refused_status)
+    check(
+        demoted.is_dir() and "audit-private path" in (demoted / "report.md").read_text(),
+        "the demoted finding says why it is not a crash",
+    )
+
+    # The batch pass exports first; an unexportable crash leaves there,
+    # before the field review spends a model call on it.
+    batch_root = root / "bundle-refused-batch"
+    (batch_root / "crashes-rejected").mkdir(parents=True)
+    batch_crash = _crash_dir(
+        batch_root, "CRASH-028", report=_GOOD_REPORT,
+        sanitizer=_ASAN, testcase=True,
+    )
+    batch_counts: dict[str, int] = {}
+    with mock.patch.object(
+        triage, "_run_tool", return_value=crash_bundle.UNEXPORTABLE_EXIT,
+    ) as batch_tools, mock.patch.object(triage, "converge_reach_fields") as converge, \
+            mock.patch.object(triage, "triage_one_crash") as one_crash:
+        triage._adjudicate_crash_dirs(
+            [batch_crash], results=batch_root, target_root=root,
+            target_slug="sampleproj", controls=["bytes"], findings_only=False,
+            deadline=None, target_root_is_product=False, bypasses=set(),
+            age_pending=True, workers=1, usage_index=None, counts=batch_counts,
+        )
+    check(batch_tools.call_count == 1, "the batch pass exported the crash once", batch_tools.call_args_list)
+    check(
+        batch_counts.get("demoted") == 1
+        and (batch_root / "findings" / "FIND-028").is_dir()
+        and converge.call_args.args[0] == []
+        and not one_crash.called,
+        "the batch pass demotes an unexportable crash before any review",
+        repr((batch_counts, converge.call_args, one_crash.call_args_list)),
+    )
+
+    # A failing tool's diagnosis reaches the operator instead of /dev/null.
+    tool_stderr = io.StringIO()
+    with redirect_stderr(tool_stderr):
+        tool_rc = triage._run_tool(
+            "export-repro", "CRASH-404", "--crash-dir", str(root / "absent"),
+        )
+    check(tool_rc == 1, "a missing crash dir fails export", tool_rc)
+    check(
+        "WARN: export-repro CRASH-404 failed (rc=1)" in tool_stderr.getvalue()
+        and "crash dir not found" in tool_stderr.getvalue(),
+        "the tool's own reason is surfaced", tool_stderr.getvalue(),
     )
 
     # export-repro moves the draft report.md under .audit and installs the

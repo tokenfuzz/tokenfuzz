@@ -44,6 +44,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import audit_scope
+import build_scope
 import native_symbols
 import sanitizer
 import symbol_names
@@ -1418,9 +1419,6 @@ COMPILE_SANITIZERS = {
 }
 
 
-_CXX_SUFFIXES = {".cc", ".cpp", ".cxx", ".c++", ".mm"}
-
-
 def rebuild_recipe(destination: "str | os.PathLike" = "") -> str:
     """The one way to rebuild a target's library for fuzzing.
 
@@ -1450,8 +1448,14 @@ def fuzzing_compiler(cxx: bool = False) -> str:
 
 
 def compiler_for(source: Path) -> str:
-    """The fuzzing compiler for one harness source, C or C++."""
-    return fuzzing_compiler(source.suffix.lower() in _CXX_SUFFIXES)
+    """The fuzzing compiler for one harness source, C or C++, by suffix.
+
+    These harnesses are written by this tooling under the suffix convention,
+    so the suffix is authoritative and no compile is spent asking.
+    """
+    return fuzzing_compiler(
+        source.suffix == ".C" or source.suffix.lower() in build_scope.CXX_SUFFIXES
+    )
 
 
 # ── Source-grounded harness receipt ─────────────────────────────────

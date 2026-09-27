@@ -11,6 +11,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from collections.abc import Collection, Iterator
@@ -1961,15 +1962,37 @@ def _clear_contract_concern(report: Path) -> None:
         report.write_text(updated.rstrip() + "\n", encoding="utf-8")
 
 
+_UNEXPORTABLE_REASON = (
+    "the reproducer names an audit-private path, so no maintainer bundle can "
+    "be exported from it"
+)
+
+
 def _run_tool(
     name: str, *args: str, env: dict | None = None,
     stdin_data: bytes | None = None,
 ) -> int:
-    return subprocess.run(
-        [str(SCRIPT_ROOT / "bin" / name), *map(str, args)],
-        env=env, input=stdin_data, stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL, check=False,
-    ).returncode
+    # A file, not a pipe: a tool's descendant that outlives it and keeps
+    # stderr open would otherwise hold this call until it exits.
+    with tempfile.TemporaryFile() as stderr:
+        completed = subprocess.run(
+            [str(SCRIPT_ROOT / "bin" / name), *map(str, args)],
+            env=env, input=stdin_data, stdout=subprocess.DEVNULL,
+            stderr=stderr, check=False,
+        )
+        stderr.seek(0)
+        diagnosis = stderr.read() if completed.returncode else b""
+    if completed.returncode:
+        # The tool's own diagnosis is the only record of why it failed: a
+        # discarded one left a crash pending on "missing reproduce.sh" with
+        # no stated cause.
+        lines = diagnosis.decode(errors="replace").strip().splitlines()
+        print(
+            f"WARN: {name} {args[0] if args else ''} failed "
+            f"(rc={completed.returncode}): {lines[-1] if lines else 'no diagnostic'}",
+            file=sys.stderr,
+        )
+    return completed.returncode
 
 
 _REPORT_GATE_DEFAULT_MAX_BYTES = 96 * 1024
@@ -3139,11 +3162,17 @@ def triage_one_crash(
         RESULTS_DIR=str(results_dir), TARGET_ROOT=str(target_root), TARGET_SLUG=target_slug
     )
     if _bundle_needs_refresh(crash_dir) and _decision_timeout(1, deadline):
-        _run_tool(
+        exported = _run_tool(
             "export-repro", crash_dir.name, "--crash-dir", str(crash_dir),
             "--slug", target_slug, *_symbolize_budget_args(deadline),
             env=environment,
         )
+        if exported == crash_bundle.UNEXPORTABLE_EXIT:
+            # No pass can export it, so holding it pending only ages it into a
+            # rejection that loses the report. A crash needs a maintainer
+            # bundle; source review still adjudicates the claim as a finding.
+            demote_to_finding(crash_dir, results_dir, _UNEXPORTABLE_REASON)
+            return "demoted"
     bundle_missing = _bundle_missing_artifacts(crash_dir)
     if bundle_missing:
         return _hold_incomplete(
@@ -3649,6 +3678,7 @@ def _adjudicate_crash_dirs(
     # invalidated immediately when the draft becomes the exported report.
     # Incomplete bundles remain on triage_one_crash's ordinary pending path and
     # do not consume a source-review session.
+    unexportable: list[Path] = []
     for directory in reach_directories:
         report = _report(directory)
         sanitizer = _sanitizer_file(directory)
@@ -3667,12 +3697,21 @@ def _adjudicate_crash_dirs(
             and (testcase is not None or harness is not None)
             and _bundle_needs_refresh(directory)
             and _decision_timeout(1, deadline)
-        ):
-            _run_tool(
+            and _run_tool(
                 "export-repro", directory.name, "--crash-dir", str(directory),
                 "--slug", target_slug, *_symbolize_budget_args(deadline),
                 env=environment,
-            )
+            ) == crash_bundle.UNEXPORTABLE_EXIT
+        ):
+            unexportable.append(directory)
+    for directory in unexportable:
+        # Settled here, as triage_one_crash would, before the field review
+        # below spends a model call on a crash that cannot stay one.
+        demote_to_finding(directory, results, _UNEXPORTABLE_REASON)
+        counts["demoted"] = counts.get("demoted", 0) + 1
+    if unexportable:
+        reach_directories = [d for d in reach_directories if d not in unexportable]
+        directories = [d for d in directories if d not in unexportable]
     # Export rewrites report.md and moves the draft and audit-side caches
     # under .audit/.  Converge only after that boundary so the field decision, trigger
     # review, and final receipt all bind the same report.  Doing this first
