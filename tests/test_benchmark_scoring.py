@@ -432,6 +432,22 @@ class BenchmarkScoringTests(unittest.TestCase):
         self.assertEqual(score["overall"]["recall"], 1.0)
         self.assertEqual(score["overall"]["precision"], 1.0)
 
+    def test_an_arbitrary_write_near_an_object_credits_its_plant(self) -> None:
+        # A store through an attacker-chosen address reports the region it
+        # lands in; near a heap chunk that is a heap overflow WRITE, and still
+        # the one planted store, not an unexpected crash.
+        run = self.root / "arbitrary-write"
+        self.make_crash(
+            run, "CRASH-0001",
+            "rbundle::(anonymous namespace)::handle_write(unsigned char const*, unsigned short)",
+            "heap-buffer-overflow",
+        )
+        _, score = self.score(
+            run, manifest=ROOT / "output/samples/sample-cpp/.ground-truth.json",
+        )
+        self.assertEqual(score["overall"]["detected"], ["encoded-address-arbitrary-write"])
+        self.assertEqual(score["overall"]["unexpected_crashes"], [])
+
     def test_multi_report_attribution_does_not_splice_faults(self) -> None:
         run = self.root / "multi-report"
         crash = self.make_crash(
