@@ -1431,8 +1431,8 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
     check(
         validator_rc == 2
         and trigger_launch.get("cwd") == root / ".validator-cwd"
-        and trigger_launch.get("turn_cap") == 16
-        and trigger_launch.get("max_turns") == 16
+        and trigger_launch.get("turn_cap") == 24
+        and trigger_launch.get("max_turns") == 24
         and trigger_launch.get("allow_subagents") is False
         and validator_profile == "external-bypass",
         "validator source review is isolated and bounded",

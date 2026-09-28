@@ -32,9 +32,13 @@ VOTES = {"Promote": 0, "Reject": 1, "Uncertain": 2}
 # audit wall on a single finding. The hard cap sits above the budget the prompt
 # states so the reviewer still has turns left to emit its verdict — a session
 # killed mid-answer parses as nothing and is re-run, costing more wall than it
-# saved. The finding gate is a full second-opinion review and stays unbounded.
+# saved. The review's own wall timeout bounds its length; the cap only stops a
+# runaway. At budget + 4, 40 of 144 codex reviews on opencv reached the cap,
+# most within 60 s of short reads, and 31 were killed without a vote, so the
+# margin is the whole budget again. The finding gate is a full second-opinion
+# review and stays unbounded.
 TRIGGER_REVIEW_TOOL_CALLS = 12
-TRIGGER_REVIEW_TURN_CAP = TRIGGER_REVIEW_TOOL_CALLS + 4
+TRIGGER_REVIEW_TURN_CAP = TRIGGER_REVIEW_TOOL_CALLS * 2
 
 
 def log_validator_decision(
