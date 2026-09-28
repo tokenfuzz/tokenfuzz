@@ -12,5 +12,5 @@ Detect at session start: `test -d .hg && echo "hg" || echo "git"`
 | Search commits | `git log --all --grep='Bug NNNNN'` | `hg log -k "Bug NNNNN"` |
 | Symbol history | `git log -S"FuncName" -- <file>` | `hg log -k "FuncName" <file>` |
 | Blame | `git blame file.cpp` | `hg annotate file.cpp` |
-| Save proposed-patch diff | `git -C <target_root> diff -- <file> > $FIND_DIR/patch.diff` | `hg -R <target_root> diff <file> > $FIND_DIR/patch.diff` |
+| Save proposed-patch diff (edited scratch copy, either VCS: `diff -u --label a/<file> --label b/<file> <target_root>/<file> <copy> > $FIND_DIR/patch.diff`) | `git -C <target_root> diff -- <file> > $FIND_DIR/patch.diff` | `hg -R <target_root> diff <file> > $FIND_DIR/patch.diff` |
 | Revert working tree | `git -C <target_root> checkout -- <file>` | `hg -R <target_root> revert <file>` |

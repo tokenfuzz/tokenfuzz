@@ -517,27 +517,28 @@ downgrades a finding:
   `patch.diff` in the FIND directory (alongside `report.md`), or in
   the CRASH directory for CRASH reports. Write one whenever the fix is a
   surgical diff you can capture; skip it (and let the `## Fix Direction`
-  line stand) when you can't — don't stall a finding over it. The format
-  must match the
-  target's VCS so maintainers can apply it directly. See
-  `.agents/references/vcs-commands.md` for the capture command; the
-  short forms are:
+  line stand) when you can't — don't stall a finding over it. Capture it
+  mechanically; hand-written hunks are the usual `corrupt patch`. Edit a
+  scratch copy rather than the target tree, which other agents are probing:
 
   ```bash
-  # git target:
-  git -C "$TARGET_ROOT" diff -- path/to/file.cpp > "$FIND_DIR/patch.diff"
-  # hg target (Firefox / mozilla-central):
-  hg -R "$TARGET_ROOT" diff path/to/file.cpp > "$FIND_DIR/patch.diff"
+  cp "$TARGET_ROOT/path/to/file.cpp" "$RESULTS_DIR/scratch-N/file.cpp"   # then edit the copy
+  diff -u --label a/path/to/file.cpp --label b/path/to/file.cpp \
+    "$TARGET_ROOT/path/to/file.cpp" "$RESULTS_DIR/scratch-N/file.cpp" > "$FIND_DIR/patch.diff"
   ```
+
+  `diff` exits 1 when the files differ, so do not chain it with `&&`. The
+  labelled unified diff applies under both git and hg; the VCS-native
+  capture in `.agents/references/vcs-commands.md` also works on a file you
+  edited in place.
 
   Keep the patch surgical — only the missing check or corrected line,
   no surrounding refactoring or whitespace churn. Save `patch.diff`
   whenever it applies cleanly under
   `git -C "$TARGET_ROOT" apply --check` — a non-mutating check that
-  never touches the source. (`hg import --no-commit` is not a dry run;
-  it applies to the working tree, so for Mercurial targets just save
-  the `hg diff` and skip apply-validation rather than modify the
-  source.) Build/repro confirmation is optional and improves quality
+  never touches the source and works on a Mercurial tree too (never
+  `hg import --no-commit`: it is not a dry run and applies to the working
+  tree). Build/repro confirmation is optional and improves quality
   but is not required:
   prefer an existing sanitizer build dir
   (`build-asan${AUDIT_BUILD_SUFFIX:-}/`, see `AGENTS.md`), fall back to

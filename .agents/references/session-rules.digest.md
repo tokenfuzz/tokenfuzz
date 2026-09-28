@@ -248,7 +248,11 @@ Point at the fix with exactly one pointer (best-effort, never blocks filing):
 end `report.md` with a `## Fix Direction` heading (on its own line), or,
 when the fix is a surgical diff, save it
 as `patch.diff` in the FIND/CRASH dir instead — `bin/enrich-report` inlines
-it as `## Patch`, so don't write that section yourself. Capture/validation
+it as `## Patch`, so don't write that section yourself. Never hand-write
+hunks: edit a scratch copy, then
+`diff -u --label a/<path> --label b/<path> "$TARGET_ROOT/<path>" <copy> > <dir>/patch.diff`
+(exit 1 means the files differ) and check it with
+`git -C "$TARGET_ROOT" apply --check <dir>/patch.diff`. Other
 mechanics: `.agents/references/session-rules.md`.
 
 ## Pre-file checks
