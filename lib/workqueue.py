@@ -2236,6 +2236,22 @@ def structural_path_score(rel: str) -> tuple[int, list[str]]:
     return score, reasons
 
 
+#: Directory names that by convention hold a copy of another project's
+#: source. Such code is in scope, but its upstream usually audits and fuzzes
+#: it already, while the keyword scorer rates a mature codec as highly as the
+#: product's own parsers: in one 3-hour benchmark, vendored codecs held 66 of
+#: 121 ranked files and yielded no accepted crash.
+VENDORED_DIR_NAMES = frozenset({
+    "3rdparty", "third_party", "third-party", "thirdparty", "vendor",
+    "vendored", "subprojects",
+})
+VENDORED_REASON = "vendored dependency (score halved)"
+
+
+def is_vendored_path(rel: str) -> bool:
+    return any(part.lower() in VENDORED_DIR_NAMES for part in rel.split("/")[:-1])
+
+
 def rank_target(
     ctx: Context, limit: int, patch_cards: Path | None = None,
     strategy: str = "", delta_files: dict[str, str] | None = None,
@@ -2321,6 +2337,12 @@ def rank_target(
             score += 16
             reasons.append("has clean HIT seed")
         primary_strategy = strategy_for(reasons)
+        if score > 0 and delta_files is None and is_vendored_path(rel):
+            # Halved, not floored: a strong vendored file still outranks a
+            # weak product one, and prior-fix cards keep their own score. A
+            # delta run skips it: a dependency bump is the change under audit.
+            score = max(1, score // 2)
+            reasons.append(VENDORED_REASON)
         if delta_files is not None:
             # Every file in the delta is work by definition. A quiet one is
             # offered on the fallback lane rather than dropped or floored.

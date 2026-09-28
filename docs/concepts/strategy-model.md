@@ -108,7 +108,10 @@ by default; see [Environment
 variables](../reference/environment.md#worker-pool)), with every card of a
 selected file riding along. A file's score adds its code-feature points,
 path shape, and boosts for sitting near a prior fix, in an under-covered
-subsystem, or where a clean seed already reaches it.
+subsystem, or where a clean seed already reaches it. A file under a
+vendored-dependency directory (`3rdparty/`, `third_party/`, `vendor/`,
+`subprojects/`, and their spellings) has its score halved outside a delta
+run: it stays in scope, but its upstream usually fuzzes it already.
 
 Scores are not comparable across strategies, because some rows score once on
 presence and others multiply per match. Ordering by score alone would hand

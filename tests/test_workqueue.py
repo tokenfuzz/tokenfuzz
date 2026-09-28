@@ -326,6 +326,44 @@ class WorkQueueTests(unittest.TestCase):
             "a pinned lane spends the whole window on its own best files",
         )
 
+    def test_a_vendored_copy_ranks_below_the_same_product_code(self) -> None:
+        body = (
+            "int parse_record(char *dst, const char *src, size_t length) {\n"
+            "  char *copy = malloc(length);\n"
+            "  memcpy(dst, src, length);\n"
+            "  free(copy);\n"
+            "  return 0;\n"
+            "}\n"
+        )
+        for rel in ("src/record.c", "third_party/codec/record.c"):
+            path = self.target / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(body, encoding="utf-8")
+        cards = {
+            card["file"]: card for card in workqueue.rank_target(self.ctx, 10)
+            if card["kind"] == "ranked-source"
+        }
+        product, vendored = cards["src/record.c"], cards["third_party/codec/record.c"]
+        self.assertEqual(vendored["score"], max(1, product["score"] // 2))
+        self.assertIn(workqueue.VENDORED_REASON, vendored["reason"])
+        self.assertNotIn(workqueue.VENDORED_REASON, product["reason"])
+        # Only a directory component counts, never a file or a word inside one.
+        self.assertFalse(workqueue.is_vendored_path("src/vendor.c"))
+        self.assertFalse(workqueue.is_vendored_path("src/vendors/record.c"))
+        self.assertTrue(workqueue.is_vendored_path("3rdparty/lib/a.c"))
+        # A delta run audits the change itself, a dependency bump included.
+        delta = {
+            card["file"]: card for card in workqueue.rank_target(
+                self.ctx, 10, delta_files={
+                    "src/record.c": "changed", "third_party/codec/record.c": "changed",
+                },
+            )
+            if card["kind"] == "ranked-source"
+        }
+        self.assertEqual(
+            delta["third_party/codec/record.c"]["score"], delta["src/record.c"]["score"],
+        )
+
     def test_pinned_window_leads_with_its_own_evidence(self) -> None:
         # Dense memory-heavy files mint S3 companions on size math alone and
         # outscore a sparse file holding the lane's real decision.
