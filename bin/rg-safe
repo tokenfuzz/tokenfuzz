@@ -72,6 +72,54 @@ def file_hit_digest(executable: str, argv: list[str]) -> bytes:
     return ("\n".join(lines) + "\n").encode()
 
 
+def rooted_operands(stderr: bytes, args: list[str]) -> dict[str, str]:
+    """Missing relative path operands that exist under the session's roots.
+
+    Structured state names source target-relative (`src/parse.c`) while
+    sessions run from the harness root, as `bin/peek` already allows for: 173
+    of 175 relative operands rg reported missing across two opencv codex
+    cells existed under TARGET_ROOT, each a wasted turn. rg names every
+    missing operand verbatim, so which argv entries are paths is rg's own
+    parse, never a guess about its flags. A spelling that appears more than
+    once in argv may also be the pattern or an option value, so it is left
+    alone.
+    """
+    roots = [
+        Path(value)
+        for value in (os.environ.get("TARGET_ROOT"), os.environ.get("RESULTS_DIR"))
+        if value
+    ]
+    found: dict[str, str] = {}
+    for line in stderr.decode(errors="replace").splitlines():
+        if not (line.startswith("rg: ") and line.endswith("(os error 2)")):
+            continue
+        operand = line[len("rg: "):].split(": ", 1)[0]
+        if args.count(operand) != 1 or Path(operand).is_absolute():
+            continue
+        for root in roots:
+            if (root / operand).exists():
+                found[operand] = str(root / operand)
+                break
+    return found
+
+
+def run(
+    executable: str, prefix: list[str], args: list[str], cap_env, *, reroot: bool,
+) -> "tuple[int, bytes, bytes] | dict[str, str]":
+    """Capped (returncode, stdout, stderr), or the operands to rerun rooted.
+
+    The rerun is decided before capping, so a discarded first run leaves no
+    spill file behind.
+    """
+    with capture_command([executable, *prefix, *args]) as completed:
+        stderr = completed.stderr.read_bytes()
+        rooted = rooted_operands(stderr, args) if reroot else {}
+        if rooted:
+            return rooted
+        output = cap_output_file(completed.stdout, "rg-safe", cap_env)
+        return completed.returncode, output, stderr
+
+
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     byte_value = os.environ.get("RG_BYTES")
@@ -116,20 +164,21 @@ def main(argv: list[str] | None = None) -> int:
         cap_env["OUTCAP_MAX_BYTES"] = str(byte_cap)
         cap_env["OUTCAP_HEAD_BYTES"] = str(byte_cap * 3 // 5)
         cap_env["OUTCAP_TAIL_BYTES"] = str(byte_cap * 2 // 5)
-    with capture_command(
-        [executable, *prefix, *passthrough], capture_stderr=False
-    ) as completed:
-        try:
-            output = cap_output_file(completed.stdout, "rg-safe", cap_env)
-        except ValueError as exc:
-            print(exc, file=sys.stderr)
-            return 2
-        sys.stdout.buffer.write(output)
-        if b"[output_cap: rg-safe truncated" in output:
-            sys.stdout.buffer.write(
-                file_hit_digest(executable, [*prefix, *passthrough])
-            )
-        return completed.returncode
+    try:
+        result = run(executable, prefix, passthrough, cap_env, reroot=True)
+        if isinstance(result, dict):
+            passthrough = [result.get(arg, arg) for arg in passthrough]
+            result = run(executable, prefix, passthrough, cap_env, reroot=False)
+        returncode, output, stderr = result
+    except ValueError as exc:
+        print(exc, file=sys.stderr)
+        return 2
+    sys.stderr.buffer.write(stderr)
+    sys.stderr.buffer.flush()
+    sys.stdout.buffer.write(output)
+    if b"[output_cap: rg-safe truncated" in output:
+        sys.stdout.buffer.write(file_hit_digest(executable, [*prefix, *passthrough]))
+    return returncode
 
 
 if __name__ == "__main__":

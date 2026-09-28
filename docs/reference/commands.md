@@ -670,7 +670,7 @@ run them by hand when diagnosing a run. Most read `RESULTS_DIR` and
 | Command | What it does |
 | --- | --- |
 | `bin/peek <file>[:<start>[-<end>]]` | Bounded source read (about 50 KiB). `bin/peek [grep flags] <pattern> <file>…` greps with context clamped to `PEEK_GREP_AFTER` (30) and `PEEK_GREP_BEFORE` (8) lines. `--no-cap` disables clamping. |
-| `bin/rg-safe [rg args]` | ripgrep with a 20 KiB output cap and a per-file hit digest when it truncates. Skips `.git/`, `.hg/`, and `output/**/logs/`; `--cap-bytes <n>`, `--no-cap`, `--include-logs`. |
+| `bin/rg-safe [rg args]` | ripgrep with a 20 KiB output cap and a per-file hit digest when it truncates. A relative path that is missing from the working directory is searched under the target or results tree instead. Skips `.git/`, `.hg/`, and `output/**/logs/`; `--cap-bytes <n>`, `--no-cap`, `--include-logs`. |
 | `bin/show-patch <commit> [<path>…] [git show flags]` | Bounded, memoized `git show` of one commit, `--unified=10` by default (`PATCH_CONTEXT`). |
 | `bin/find-seed <file>[:<function>] [max]` | In-tree tests, samples, and corpus inputs likely to exercise that code, best first (default 15). Needs `TARGET_ROOT`. |
 | `bin/scratch-status [dir…]` | Digest of scratch directories: testcase/output pairs and unrun testcases. Default: every `scratch-*` under `RESULTS_DIR`. `--agent N`, `--terse`, `--files [N]`. |

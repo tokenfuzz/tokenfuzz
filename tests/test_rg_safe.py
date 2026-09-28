@@ -193,6 +193,41 @@ class RipgrepSafeTests(unittest.TestCase):
         self.assertNotIn("src/code.c", proc.stdout)
         self.assertNotIn("sess.log.raw", proc.stdout)
 
+    def test_target_relative_operands_resolve_under_the_session_roots(self) -> None:
+        target = self.root / "target"
+        self.write("target/src/parse.c", "int needle;\nsrc/parse.c\n")
+        elsewhere = self.root / "cwd"
+        elsewhere.mkdir()
+
+        def search(*args, **env):
+            command_env = {**os.environ, "TARGET_ROOT": str(target), **env}
+            command_env.pop("RESULTS_DIR", None)
+            return subprocess.run(
+                [str(COMMAND), *args], cwd=str(elsewhere),
+                capture_output=True, text=True, env=command_env,
+            )
+
+        for operand in ("src/parse.c", "src"):
+            proc = search("-n", "needle", operand)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertIn("int needle", proc.stdout)
+            self.assertNotIn("No such file", proc.stderr)
+        # A spelling that is also the pattern or an option value is left
+        # alone, whichever of its occurrences rg read as the path.
+        for args in (("src/parse.c", "src/parse.c"), ("src/parse.c", "-e", "src/parse.c")):
+            proc = search("-n", *args)
+            self.assertEqual(proc.returncode, 2)
+            self.assertIn("src/parse.c", proc.stderr)
+        # A path under neither root still fails the way rg does.
+        proc = search("needle", "src/absent.c")
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("src/absent.c", proc.stderr)
+        # A cwd-relative operand is searched where it is, not re-rooted.
+        (elsewhere / "src").mkdir()
+        (elsewhere / "src" / "parse.c").write_text("local\n", encoding="utf-8")
+        proc = search("needle", "src/parse.c")
+        self.assertEqual(proc.returncode, 1)
+
     def test_real_raw_log_shape_is_capped(self) -> None:
         tree = self.make_log_tree()
         raw = tree / "output/foo/codex/logs/huge.log.raw"
