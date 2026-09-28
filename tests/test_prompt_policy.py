@@ -521,6 +521,14 @@ class SharedPolicyAgreementTests(unittest.TestCase):
                     self.read("lib", "prompts", name),
                 )
 
+    def test_api_hardening_filing_does_not_steer_new_work_off_model(self) -> None:
+        # "Never gate them out" is a filing rule. Read as a work rule, it sent
+        # two of three seats after API-argument crashes that a bytes-only
+        # threat model rejects wholesale.
+        body = self.read("lib", "prompts", "safety_framing.md.j2")
+        self.assertIn("never gate them out", body)
+        self.assertIn("do not go looking for more where those controls do not supply", body)
+
     def test_application_supplied_reaches_the_scorer_from_author_docs(self) -> None:
         # Scoring must not depend on the bounded triage fill-in pass: the
         # agent needs the value in its own vocabulary and bin/severity has to

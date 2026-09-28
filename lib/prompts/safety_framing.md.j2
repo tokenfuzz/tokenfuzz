@@ -107,7 +107,9 @@ node types are contract terms even when unenforced; do not dismiss a validity
 requirement as advisory merely because it is politely phrased. A recommendation
 that does not define accepted input remains advisory. Belonging in `crashes/` is a filing
 rule, not credit: security credit needs a trigger inside this target's
-`attacker_controls`.
+`attacker_controls`. So file an API-hardening crash you hit, but do not go
+looking for more where those controls do not supply the argument it needs:
+spend new effort on inputs they reach.
 
 **Harness artifacts, never filed:** the testcase writes private struct fields,
 links test-only symbols, frees a pointer the docs say must not be reused, or
