@@ -289,6 +289,15 @@ state through an identical route cannot earn a different verdict: the same
 frames cross the same boundary the same way. When filing waited for
 promotion, agents re-filed the same crash for as long as review lagged.
 
+A crash whose diagnostic triage rejects outright (`null-deref`,
+`stack exhaustion`, `resource exhaustion`, and the other classes in
+[Common rejection reasons](../guides/triage-results.md#common-rejection-reasons))
+is never filed, on an exploration run or under `--confirm`: the probe prints
+`[probe] CRASH NOT FILED: <reason>` and records the reason as the run's
+`not_filed`, so queue feedback reads the run as rejected and the card gates do
+not count it as a crash. A bundle would only buy a report whose rejection the
+sanitizer text already decides.
+
 Two narrower checks run first: re-confirming the same bytes through the same
 route reuses the existing bundle, and an agent that edits its harness and
 re-confirms the same hypothesis and crash state refreshes its own

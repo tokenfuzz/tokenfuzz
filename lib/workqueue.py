@@ -5615,6 +5615,9 @@ def card_run_count(ctx: Context, card_id: str, verdict: str = "") -> int:
             continue
         if want and str(r.get("verdict", "") or "").upper() != want:
             continue
+        # A crash bin/probe declined to file is no crash conclusion.
+        if want == "CRASH" and r.get("not_filed"):
+            continue
         n += 1
     return n
 
@@ -6488,6 +6491,10 @@ def add_run(ctx: Context, args: argparse.Namespace) -> dict:
     duplicate_of = getattr(args, "duplicate_of", None)
     if duplicate_of is not None:
         row["duplicate_of"] = str(duplicate_of)
+    # A crash bin/probe declined to file because triage rejects its class.
+    not_filed = str(getattr(args, "not_filed", "") or "").strip()
+    if not_filed:
+        row["not_filed"] = not_filed
     append_jsonl(state_dir(ctx.results_dir) / "runs.jsonl", row)
     return row
 
@@ -8074,7 +8081,11 @@ def runtime_feedback(
     for row in rows:
         verdict = (row.get("verdict") or "UNKNOWN").strip().upper() or "UNKNOWN"
         verdict_counts[verdict] = verdict_counts.get(verdict, 0) + 1
-        if (
+        if verdict == "CRASH" and row.get("not_filed"):
+            # Rejected at filing, before any bundle: triage's verdict, early.
+            rejected_verdicts += 1
+            rejection = rejection or f"bin/probe: {row['not_filed']}"
+        elif (
             verdict in {"CRASH", "FIND"}
             and str(row.get("hypothesis_id", "")) in rejected_hypotheses
         ):

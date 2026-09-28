@@ -793,6 +793,78 @@ class ExplorationProbeTests(unittest.TestCase):
             )
             self.assertIsNone(telemetry.execution_verdicts(results)["filed_state_repeats"])
 
+    def test_a_class_triage_always_rejects_is_not_filed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "target"
+            results = root / "output/sample/codex/results"
+            scratch = results / "scratch-1"
+            logs = root / "logs"
+            source = target / "src/app.c"
+            scratch.mkdir(parents=True)
+            logs.mkdir()
+            source.parent.mkdir(parents=True)
+            source.write_text("int app_parse(void) { return 0; }\n")
+            tool = target / "build-asan/tool"
+            tool.parent.mkdir()
+            tool.write_text(
+                "#!/bin/sh\n"
+                "[ -s \"$1\" ] || exit 0\n"
+                "echo TESTCASE_EXECUTED\n"
+                "if grep -q huge \"$1\"; then\n"
+                "  echo 'ERROR: AddressSanitizer: requested allocation size 0xffffffffff exceeds maximum supported size' >&2\n"
+                "  echo 'ERROR: AddressSanitizer: allocation-size-too-big' >&2\n"
+                "else\n"
+                "  echo 'ERROR: AddressSanitizer: heap-buffer-overflow on address 0x1' >&2\n"
+                "fi\n"
+                f"echo '    #0 0x1 in app_parse {source}:1' >&2\n"
+                "exit 1\n",
+                encoding="utf-8",
+            )
+            tool.chmod(0o755)
+            (root / "output/sample/target.toml").write_text(
+                'target="sample"\nbuild_system="cmake"\nbuild_widening=false\n'
+                'asan_bin="build-asan/tool"\n',
+                encoding="utf-8",
+            )
+            (results / ".session-env").write_text(
+                f"RESULTS_DIR={results}\nTARGET_ROOT={target}\nTARGET_SLUG=sample\n"
+                f"TARGET_REV=test\nLOGDIR={logs}\n"
+            )
+            environment = os.environ.copy()
+            environment.update(PROBE_AUTO_ROUTE="0", LLM_DECIDE_DISABLE="1")
+            environment.pop("AUDIT_BUILD_SUFFIX", None)
+
+            def probe(name: str) -> str:
+                testcase = scratch / f"{name}.txt"
+                testcase.write_text(
+                    f"// TARGET: src/app.c:app_parse:1\n// HYPOTHESIS-ID: H-{name}\n"
+                    f"// CATEGORY: size\n// MODE: generic\n{name}\n"
+                )
+                completed = subprocess.run(
+                    [str(ROOT / "bin/probe"), "--confirm", str(testcase)],
+                    env=environment, capture_output=True, text=True, check=False,
+                )
+                return completed.stdout + completed.stderr
+
+            output = probe("huge")
+            self.assertIn("CRASH NOT FILED: resource exhaustion", output)
+            self.assertEqual(list((results / "crashes").glob("CRASH-*")), [])
+            # Structured state reads the refusal as a rejection, not as a
+            # candidate crash still owed its report and card closure.
+            run = workqueue.read_jsonl(results / "state" / "runs.jsonl")[-1]
+            self.assertEqual((run["verdict"], run["not_filed"]), ("CRASH", "resource exhaustion"))
+            context = workqueue.Context(ROOT, target, "sample", results, "git")
+            feedback = workqueue.runtime_feedback(context, hypothesis_id="H-huge")
+            self.assertIn("artifact-rejected", feedback)
+            self.assertIn("bin/probe: resource exhaustion", feedback)
+            self.assertNotIn("artifact-candidate", feedback)
+            workqueue.append_jsonl(results / "state" / "runs.jsonl", {**run, "card_id": "WORK-X"})
+            self.assertEqual(workqueue.card_run_count(context, "WORK-X", verdict="CRASH"), 0)
+            output = probe("overflow")
+            self.assertIn("CRASH FILED", output)
+            self.assertEqual(len(list((results / "crashes").glob("CRASH-*"))), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

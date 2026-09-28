@@ -1071,6 +1071,8 @@ class HarnessBuilder:
 class Probe:
     #: Filed bundle this run's crash state repeats; see _filed_state_owner.
     duplicate_of: str | None = None
+    #: Why triage would reject this crash outright; "" files it normally.
+    not_filed: str = ""
 
     def __init__(self, args: argparse.Namespace):
         self.args = args
@@ -1586,6 +1588,7 @@ class Probe:
         self._write_internal_differential_result(probe_verdict)
         print(f"[probe] verdict={probe_verdict}")
         self.duplicate_of = self._filed_state_owner(probe_verdict)
+        self.not_filed = self._autodiscard(probe_verdict)
         self._record_state(probe_verdict)
         self._file_crash(probe_verdict)
         return 0 if probe_verdict == "PROPERTY" else result
@@ -1977,12 +1980,18 @@ class Probe:
             coverage=coverage,
             closest=frame[:200] if frame else "",
             duplicate_of=self.duplicate_of,
+            not_filed=self.not_filed,
             property=(
                 self.header["property"].strip().lower()
                 if self.hypothesis_strategy == "S8" else ""
             ),
         ))
-        if probe_verdict == "CRASH" and self.sanitizer != "runner":
+        if self.not_filed:
+            self._append_state_note(
+                hypothesis,
+                f"bin/probe: {self.not_filed}; not filed (triage rejects this class).",
+            )
+        elif probe_verdict == "CRASH" and self.sanitizer != "runner":
             self._append_state_note(
                 hypothesis,
                 "bin/probe observed a sanitizer diagnostic; keep hypothesis/card active until the filed crash report is complete",
@@ -2002,6 +2011,14 @@ class Probe:
 
     def _file_crash(self, probe_verdict: str) -> None:
         if os.environ.get("_TOKENFUZZ_PRIMARY_DIFFERENTIAL") == "1":
+            return
+        if self.not_filed:
+            # Said on an exploration run too, so no --confirm is spent on it.
+            print(
+                f"[probe] CRASH NOT FILED: {self.not_filed} - triage rejects this class outright; "
+                "do not --confirm it. Move on, or change the input until it reaches a "
+                "memory-safety diagnostic."
+            )
             return
         runs = int(self.environment["SANITIZER_RUNS"])
         if not crash_bundle.should_file(probe_verdict, self.sanitizer, runs):
@@ -2073,6 +2090,26 @@ class Probe:
                 )
         else:
             print(f"[probe] CRASH already filed (identical reproducer): {self.config.results_dir}/crashes/{crash_id}")
+
+    def _autodiscard(self, probe_verdict: str) -> str:
+        """Why triage would reject this crash outright, or "" to file it.
+
+        Triage rejects these classes from the sanitizer text alone, so a
+        bundle would only buy an enrichment pass whose outcome is known. The
+        run row carries the reason, so queue feedback reads the crash as
+        rejected rather than as a candidate awaiting its report.
+        """
+        if (
+            probe_verdict != "CRASH" or self.sanitizer == "runner"
+            or os.environ.get("_TOKENFUZZ_PRIMARY_DIFFERENTIAL") == "1"
+        ):
+            return ""
+        import triage  # lazy: heavy, and only a crash needs it
+        try:
+            text = self.output.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return ""
+        return triage.autodiscard_reason(text)
 
     def _filed_state_owner(self, probe_verdict: str) -> str | None:
         """The filed bundle this crash's state and route repeat.
