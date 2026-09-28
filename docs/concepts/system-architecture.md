@@ -72,10 +72,14 @@ their own rather than as ranking signals.
 [Strategy model](strategy-model.md#how-the-visible-window-is-filled)
 explains how the window is filled.
 
-An optional one-shot model rerank then adjusts the order: by default it
-adds a bounded boost to the cards it scores, and in its `primary` mode
-([`RANK_WORK_LLM_MODE`](../reference/environment.md#model-decisions)) it
-orders the window outright, with the deterministic score as tiebreaker. If
+An optional one-shot model rerank then adjusts the order: by default
+(`primary`) it orders the window by how directly the declared attacker
+controls reach each file, with the deterministic score as tiebreaker, and in
+its `boost` mode
+([`RANK_WORK_LLM_MODE`](../reference/environment.md#model-decisions)) it only
+adds a bounded increment to the cards it scores. The keyword score cannot
+tell a reachable parser from a keyword-dense utility file, which is why the
+model leads by default. If
 the rerank is disabled, times out, or returns malformed JSON, the
 deterministic order stands. Either way the model only reorders cards it was
 shown: the harness never lets a model decide what is *in scope*.

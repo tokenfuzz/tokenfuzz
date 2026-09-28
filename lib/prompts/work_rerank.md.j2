@@ -3,8 +3,13 @@ You are reranking sanitizer-regression audit work cards.
 The first stage already ranked files with deterministic structural signals.
 Pick candidates the regex scorer may undervalue: parsers/decoders, state
 machines, unsafe/FFI boundaries, multi-pass size computations, hand-written
-allocators, and prior-fix neighbors. Preserve diversity; do not only pick one
-subsystem or, unless the run is pinned below, one strategy.
+allocators, and prior-fix neighbors. Rank first the code that untrusted input
+reaches through the product's documented entry points (the loaders, importers,
+and decoders behind a public open, read, or parse call); a file the scorer
+rated highly for keyword density alone — general utilities, platform glue,
+generated code, a vendored dependency its upstream already fuzzes — belongs
+below it. Preserve diversity; do not only pick one subsystem or, unless the
+run is pinned below, one strategy.
 {{ focus_rule }}
 
 Return JSON only:

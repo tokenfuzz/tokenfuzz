@@ -277,7 +277,7 @@ reasoning turn.
 | --- | --- | --- |
 | `LLM_DECISION_TIMEOUT` | `45` seconds hosted, `180` for `oss`; longer for the decisions below | Ceiling on each decision. Setting it replaces every default, including those below. When it is unset, the finding gate's quality votes use `300` seconds. A stage deadline may shorten any call, and `bin/audit` refuses a value that is not a positive whole number. |
 | `RANK_WORK_LLM_TIMEOUT` | unset | Override for the work-card rerank only. `bin/rank-work --llm-timeout` takes precedence. |
-| `RANK_WORK_LLM_MODE` | `boost` | `boost` adds a bounded increment to the deterministic score; `primary` orders the ranked window by the model's score, with the deterministic score breaking ties, inside each buildability tier. Either way the model only reorders the cards it was shown, and on timeout or malformed output the deterministic order stands. `bin/rank-work --llm-mode` takes precedence. |
+| `RANK_WORK_LLM_MODE` | `primary` | `boost` adds a bounded increment to the deterministic score; `primary` orders the ranked window by the model's score, with the deterministic score breaking ties, inside each buildability tier. Either way the model only reorders the cards it was shown, and on timeout or malformed output the deterministic order stands. `bin/rank-work --llm-mode` takes precedence. |
 
 Decisions observed to run long have their own defaults, scaled from hosted
 to `oss` by the same ratio:

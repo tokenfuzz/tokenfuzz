@@ -140,8 +140,10 @@ S6.
 A run pinned with `--strategy` keeps only that lane's cards, led by those
 whose own reasons carry the lane's evidence (for S3, a security decision
 rather than size arithmetic alone). A delta run fills no window at all; see
-[Delta audits](audit-lifecycle.md#delta-audits). The optional model rerank
-reorders cards; it never adds or hides one.
+[Delta audits](audit-lifecycle.md#delta-audits). The model rerank then
+orders the window by how directly the declared attacker controls reach each
+file ([`RANK_WORK_LLM_MODE`](../reference/environment.md#model-decisions));
+it reorders cards, and never adds or hides one.
 
 ## How a card gets to an agent
 

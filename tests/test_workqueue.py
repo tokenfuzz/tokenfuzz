@@ -3604,6 +3604,23 @@ class WorkQueueTests(unittest.TestCase):
         self.assertEqual(scores["WORK-A3"], 10, "a distinct function is not boosted")
         self.assertEqual(scores["WORK-B1"], 10)
 
+    def test_llm_rerank_ignores_an_unshown_card_id(self) -> None:
+        cards = [
+            self.card("WORK-A", "src/a.c", score=50),
+            self.card("WORK-B", "src/b.c", score=40),
+        ]
+        environment = {
+            "LLM_DECIDE_MOCK_WORK_RERANK": json.dumps({
+                "cards": [{"id": "WORK-B", "boost": 30, "reason": "guessed id"}],
+            }),
+            "ACTIVE_BACKEND": "",
+        }
+        with mock.patch.dict(os.environ, environment, clear=False):
+            out = workqueue.llm_rerank_cards(
+                self.ctx, cards, top_n=1, timeout=5, mode="primary",
+            )
+        self.assertEqual(out, cards)
+
     def test_llm_rerank_uses_the_session_timeout_when_unspecified(self) -> None:
         cards = [self.card("WORK-A", "src/a.c")]
         captured: dict[str, object] = {}
@@ -3797,6 +3814,43 @@ class WorkQueueTests(unittest.TestCase):
             subprocess.run(git + ["commit", "-q", "-am", "two"], check=True, env=env)
             workqueue.llm_rerank_cards(self.ctx, new_evidence, top_n=2, timeout=5)
             self.assertEqual(decisions(), 5, "a new revision re-asks")
+
+    def test_rank_work_cli_lets_the_model_order_the_window_by_default(self) -> None:
+        dense = "".join(
+            f"void util_{n}(char *d, const char *s, size_t n) {{ char *c = malloc(n);"
+            f" memcpy(d, s, n); free(c); assert(d); int k = (int)n; (void)k; }}\n"
+            for n in range(12)
+        )
+        (self.target / "src").mkdir(exist_ok=True)
+        (self.target / "src/util.c").write_text(dense, encoding="utf-8")
+        (self.target / "src/loader.c").write_text(
+            "int app_load(const char *buf, size_t len) { return parse(buf, len); }\n",
+            encoding="utf-8",
+        )
+        loader = workqueue.ranked_card_id("sample", "src/loader.c")
+        verdict = {"cards": [{"id": loader, "boost": 30, "reason": "public loader"}]}
+        command = [
+            sys.executable, str(ROOT / "bin" / "rank-work"), "--quiet",
+            "--results-dir", str(self.results),
+            "--target-path", str(self.target),
+            "--target-slug", "sample",
+        ]
+        environment = {
+            **os.environ, "LLM_DECIDE_MOCK_WORK_RERANK": json.dumps(verdict),
+            "ACTIVE_BACKEND": "",
+        }
+
+        def first_file(**extra: str) -> str:
+            environment.pop("RANK_WORK_LLM_MODE", None)
+            result = self.run_command(command, env={**environment, **extra})
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return next(
+                card["file"] for card in workqueue.read_jsonl(self.results / "work-cards.jsonl")
+                if card.get("kind") == "ranked-source"
+            )
+
+        self.assertEqual(first_file(), "src/loader.c")
+        self.assertEqual(first_file(RANK_WORK_LLM_MODE="boost"), "src/util.c")
 
     def test_rank_work_cli_refuses_an_unknown_rerank_mode(self) -> None:
         command = [

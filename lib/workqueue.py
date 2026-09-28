@@ -2954,8 +2954,14 @@ def llm_rerank_cards(ctx: Context, cards: list[dict], top_n: int = 160,
         }, sort_keys=True)
         for card in top
     ))
+    # The instructions key it too: a revised prompt must not replay verdicts
+    # the old one produced.
+    rules = hashlib.sha1(
+        (Path(__file__).resolve().parent / "prompts" / "work_rerank.md.j2").read_bytes()
+    ).hexdigest() if source else ""
     identity = "\x00".join([
         f"source={source}" if source else f"prompt={prompt}",
+        f"rules={rules}",
         f"mode={mode}", f"max_boost={max_boost}",
         f"focus={_rerank_focus_rule(strategy, attacker_controls)}",
         f"candidates={candidate_evidence}",
@@ -3027,7 +3033,9 @@ def llm_rerank_cards(ctx: Context, cards: list[dict], top_n: int = 160,
     for card in cards:
         card = dict(card)
         cid = card.get("id", "")
-        entry = boosts.get(lead_of.get(cid, cid))
+        # Only a shown lead (or its companion) can receive a verdict. A
+        # guessed ID outside the candidate window must not jump the queue.
+        entry = boosts.get(lead_of.get(cid, ""))
         if entry:
             boost, reason = entry
             if mode == "primary":

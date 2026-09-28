@@ -50,7 +50,7 @@ EXPECTED = {
     ("hits",): ("(default: browser)", "(default: 20)"),
     ("cleanup_state",): ("(default: reset the whole target)", "default: every target under the output root)"),
     ("audit-container-shell",): ("(default: node:lts-bookworm)", "(default: /root/work)"),
-    ("rank-work",): ("(default: 80)", "(default: boost)"),
+    ("rank-work",): ("(default: 80)", "(default: primary)"),
     ("validate-finding",): ("(required unless a batch manifest is supplied)", "(default: 300)"),
 }
 

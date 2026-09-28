@@ -66,7 +66,9 @@ def main(argv: list[str]) -> int:
     )
     parser.add_argument(
         "--llm-mode", choices=RERANK_MODES,
-        default=os.environ.get("RANK_WORK_LLM_MODE", "") or "boost",
+        # Primary by default: a +30 boost cannot lift a reachable importer over
+        # a keyword-dense utility file scoring 150 points more.
+        default=os.environ.get("RANK_WORK_LLM_MODE", "") or "primary",
         help="how far the rerank verdict reaches: a bounded boost on the "
              "deterministic score, or the primary key inside the window; "
              "RANK_WORK_LLM_MODE sets it",
