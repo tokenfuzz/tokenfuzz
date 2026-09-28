@@ -37,7 +37,11 @@ frames) by similarity rather than demanding one exact bucket.
 1. **Normalize the stack** of the first sanitizer diagnostic that has one:
    demangle it, drop runtime, interceptor, allocator, libc, and C++
    standard-library frames, and strip argument lists, ABI suffixes, and
-   addresses. An unsymbolized frame keeps `module+offset`.
+   addresses. An unsymbolized frame keeps `module+offset`. A standard-library
+   wrapper that invoked an inlined lambda (`std::function`'s call operator)
+   is kept, renamed for the lambda and its owner (`app::pad::$_0`): the
+   fault is in the lambda, and dropping the frame left only the shared
+   dispatcher to tell unrelated lambdas apart.
 2. **Classify the primitive.** ASan reports keep their class and access
    direction (`heap-buffer-overflow-WRITE`); UBSan uses its check kind
    (`ubsan-<kind>`); MSan, TSan, and Go faults get their own names. Two

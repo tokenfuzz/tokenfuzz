@@ -689,6 +689,77 @@ ok(
     "render-md presents the underflow as a bounds bug",
 )
 
+
+def _lambda_trace(wrapper: str, owner_frame: str) -> str:
+    return (
+        "==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x1\n"
+        "READ of size 4 at 0x1 thread T1\n"
+        f"    #0 0x1 in {wrapper} function.h:174\n"
+        "    #1 0x2 in app::parallel_run(app::Range const&, app::Body const&) parallel.c:534\n"
+        f"    #2 0x3 in {owner_frame}\n"
+        "SUMMARY: AddressSanitizer: heap-buffer-overflow function.h:174\n"
+    )
+
+
+# An inlined lambda faults inside std::function's call operator. Dropping
+# that frame as `std::` runtime left the dispatcher alone as the crash state,
+# so unrelated lambdas handed to one dispatcher collapsed into one crash.
+_gather = stack_frames.crash_signature(_lambda_trace(
+    "std::__1::__function::__func<void app::gather<long long, unsigned int>(app::Mat const&)"
+    "::'lambda'(app::Range const&), void (app::Range const&)>::operator()(app::Range const&)",
+    "void app::gather<long long, unsigned int>(app::Mat const&) gather.c:140",
+))
+_pad = stack_frames.crash_signature(_lambda_trace(
+    "std::__1::__function::__func<app::pad(app::Mat const&, std::__1::vector<int, "
+    "std::__1::allocator<int>> const&)::$_0, void (app::Range const&)>::operator()(app::Range const&)",
+    "app::pad(app::Mat const&) pad.c:144",
+))
+_pad_second = stack_frames.crash_signature(_lambda_trace(
+    "std::__1::__function::__func<app::pad(app::Mat const&)::$_1, void (app::Range const&)>"
+    "::operator()(app::Range const&)",
+    "app::pad(app::Mat const&) pad.c:150",
+))
+assert_eq("void app::gather<long long, unsigned int>::'lambda' function.h:174", _gather[0],
+          "an inlined lambda frame is named for its templated owner")
+assert_eq("app::pad::$_0 function.h:174", _pad[0], "a numbered lambda keeps its tag")
+ok(_pad[0] != _pad_second[0], "two lambdas of one owner stay two frames")
+_gnu = stack_frames.crash_signature(
+    "==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x1\n"
+    "    #0 0x1 in std::_Function_handler<void (app::Range const&), app::pad(app::Mat const&)"
+    "::{lambda(app::Range const&)#2}>::_M_invoke(std::_Any_data const&, app::Range const&) "
+    "/usr/lib/gcc/x86_64-linux-gnu/13/../../../../include/c++/13/bits/std_function.h:290\n"
+)
+ok(bool(_gnu) and _gnu[0].startswith("app::pad::{lambda2} "),
+   f"libstdc++ spelling survives its gcc header path (got {_gnu})")
+_not_inlined = stack_frames.crash_signature(
+    "==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x1\n"
+    "    #0 0x1 in app::run(int)::$_0::operator()(int) const run.c:12\n"
+    "    #1 0x2 in std::__1::__invoke[abi:ne180100]<app::run(int)::$_0&, int>(app::run(int)::$_0&, int&&) invoke.h:344\n"
+    "    #2 0x3 in std::__1::__function::__func<app::run(int)::$_0, void (int)>::operator()(int&&) function.h:174\n"
+    "    #3 0x4 in app::dispatch(int) run.c:30\n"
+)
+assert_eq("app::run run.c:12|app::dispatch run.c:30", "|".join(_not_inlined),
+          "a lambda with its own frame is not counted again through its wrapper")
+ok(stack_frames.lambda_wrapper_owner("std::sort<int*>(int*, int*)") == ("", ""),
+   "a std frame without a lambda is still runtime")
+# Only std::function's call machinery is a wrapper: a user template whose
+# return type is a std type, or std::sort handed a comparator, also names a
+# lambda, and renaming either would drop the frame that faulted.
+ok(stack_frames.lambda_wrapper_owner(
+    "std::vector<int, std::allocator<int>> app::map_all<app::run(int)::$_0>(app::run(int)::$_0)"
+) == ("", ""), "a user template returning a std type is not a wrapper")
+ok(stack_frames.lambda_wrapper_owner(
+    "void std::__1::__sort<std::__1::_ClassicAlgPolicy, app::run(int)::$_0&, int*>(int*, int*, app::run(int)::$_0&)"
+) == ("", ""), "a std algorithm calling a comparator is not a wrapper")
+_user_template = stack_frames.crash_signature(
+    "==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x1\n"
+    "    #0 0x1 in app::run(int)::$_0::operator()(int) const run.c:8\n"
+    "    #1 0x2 in std::vector<int, std::allocator<int>> app::map_all<app::run(int)::$_0>(app::run(int)::$_0) algo.h:12\n"
+    "    #2 0x3 in app::run(int) run.c:20\n"
+)
+ok(len(_user_template) == 3 and "algo.h:12" in _user_template[1],
+   f"the user template frame keeps its place in the state (got {_user_template})")
+
 if FAILED:
     print(f"\033[0;31m{FAILED} failed, {PASSED} passed\033[0m")
     sys.exit(1)

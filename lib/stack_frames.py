@@ -64,6 +64,61 @@ _GO_RACE_LOC_RE = re.compile(r"^\s+(?P<loc>\S+\.go:\d+)(?:\s+\+0x[0-9a-fA-F]+)?\
 _GO_TRACE_HEAD_RE = re.compile(r"^goroutine \d+\b.*\[running\]:\s*$")
 _GO_TRACE_FUNC_RE = re.compile(r"^(?P<func>\S.*?)\([^()]*\)\s*$")
 _GO_TRACE_LOC_RE = re.compile(r"^\s+(?P<loc>\S+\.go:\d+)(?:\s.*)?$")
+# A lambda inlined into std::function's call operator faults inside the
+# wrapper frame, which the `std::` ignore rule drops, so every lambda handed to
+# one dispatcher shared a crash state built from the dispatcher alone. The
+# wrapper's template argument still names the lambda and the function that
+# owns it; these are the demangled spellings of that lambda (libc++, libstdc++,
+# MSVC). Only the std::function call machinery qualifies: a user template
+# returning a std type, or std::sort calling a comparator, names a lambda too.
+_LAMBDA_MARKERS = ("::'lambda", "::$_", "::{lambda(", "::<lambda")
+_STD_WRAPPER_RE = re.compile(
+    r"^std::(?:__\w+::)?(?:__function::|_Function_handler<|_Func_impl)"
+)
+
+
+def lambda_wrapper_owner(function: str) -> tuple[str, str]:
+    """(owner, lambda tag) for a std wrapper frame that invokes a lambda.
+
+    The owner is walked back from the lambda marker to the template-argument
+    boundary that opens it, keeping its own template and parameter lists
+    whole; the tag (`$_0`, `'lambda0'`, `{lambda1}`) tells apart two lambdas
+    of one owner. ("", "") for any other frame.
+    """
+    if not _STD_WRAPPER_RE.match(function):
+        return "", ""
+    found = [index for index in (function.find(m) for m in _LAMBDA_MARKERS) if index > 0]
+    if not found:
+        return "", ""
+    end = min(found)
+    depth = 0
+    start = end
+    while start > 0:
+        char = function[start - 1]
+        if char in ")>":
+            depth += 1
+        elif char in "(<":
+            if depth == 0:
+                break
+            depth -= 1
+        elif char == "," and depth == 0:
+            break
+        start -= 1
+    owner = function[start:end].strip()
+    rest = function[end + 2:]
+    if rest.startswith("$_"):
+        tag = "$_" + re.match(r"\d*", rest[2:]).group(0)
+    elif rest.startswith("'lambda"):
+        tag = rest[:rest.find("'", 1) + 1]
+    elif rest.startswith("{lambda("):
+        # No `#`: the address scrubber turns a `#`-led number into NUMBER.
+        number = re.match(r"\{lambda\(.*?\)#(\d+)\}", rest)
+        tag = "{lambda" + (number.group(1) if number else "") + "}"
+    else:
+        tag = rest[:rest.find(">") + 1]
+    return (owner, tag) if owner and tag else ("", "")
+
+
 STATE_STOP_MARKERS = (
     "Direct leak of",
     "Uninitialized value was stored to memory at",
@@ -272,6 +327,10 @@ class StackFrame:
     #: scrubbed `<addr>` placeholder, or a format with no address at all).
     #: Comparable only within one report — it moves with ASLR between runs.
     address: str = ""
+    #: For a std wrapper frame that invoked a lambda, the owner's normalized
+    #: name; `function` then names the lambda under it (see
+    #: `lambda_wrapper_owner`) and the raw line still names the wrapper.
+    lambda_owner: str = ""
 
     @property
     def state_function(self) -> str:
@@ -346,6 +405,12 @@ def parse_asan_frame(line: str) -> StackFrame | None:
     function, location = parse_frame_body(match.group("body"))
     if not function:
         return None
+    owner, tag = lambda_wrapper_owner(function)
+    if owner:
+        owner = filter_function_name(owner)
+        # The empty parameter list keeps the name on filter_function_name's
+        # parameter-strip path, which leaves a templated owner whole.
+        function = f"{owner}::{tag}()"
     address = match.group("addr")
     return StackFrame(
         index=int(match.group("index")),
@@ -355,6 +420,7 @@ def parse_asan_frame(line: str) -> StackFrame | None:
         # A scrubbed placeholder is not an address: every frame carries the
         # same one, so grouping on it would fuse unrelated frames.
         address="" if address == "<addr>" else address,
+        lambda_owner=owner,
     )
 
 
@@ -378,6 +444,10 @@ def is_ignored_frame(frame: StackFrame) -> bool:
         # process entrypoint that ClusterFuzz's `^main` rule targets. Strip it
         # so a genuine `main.<func>` race frame is not dropped as boilerplate.
         function = function.removeprefix("main.")
+    if frame.lambda_owner:
+        # The raw line names the std wrapper and its library header path,
+        # which the runtime rules drop; the owner alone decides.
+        return _cf.matches_ignore_regexes(function)
     return _cf.matches_ignore_regexes(function, frame.raw)
 
 
@@ -477,11 +547,25 @@ def iter_asan_frames(text: str) -> list[StackFrame]:
             break
         if line.startswith("SUMMARY: "):
             break
-        if frame is not None:
+        if frame is not None and not _repeats_lambda_body(frames, frame):
             frames.append(frame)
     return (
         frames or fallback_frames or iter_go_race_frames(text)
         or iter_go_traceback_frames(text)
+    )
+
+
+def _repeats_lambda_body(frames: list[StackFrame], frame: StackFrame) -> bool:
+    """Whether a wrapper frame only restates the lambda frame above it.
+
+    A lambda that was not inlined has a frame of its own, already named for
+    its owner; the wrapper frames beneath it would count that owner again.
+    """
+    if not frame.lambda_owner:
+        return False
+    above = next((f for f in reversed(frames) if not is_ignored_frame(f)), None)
+    return above is not None and above.state_function in (
+        frame.lambda_owner, frame.state_function,
     )
 
 
