@@ -334,7 +334,7 @@ unrecorded, never zero.
 | `EXEC_FAIL share` | Median fraction of probes that started but produced no valid result. |
 | `Duplicate roots` | Median share of artifact signatures filed by more than one agent: convergence, not yield. |
 | `Confirmed / seat-h` | Reportable clusters per worker-hour, pooled over completed replicates, so a condition with more seats is charged for them. |
-| `$ / confirmed` | Measured cost per reportable cluster. Withheld when any of the condition's cost is estimated or a spend floor, or nothing was confirmed. |
+| `$ / confirmed` | Measured cost per reportable cluster, with the after-wall review of that condition's artifacts added: the harness reviews inside its wall, a direct cell after it, and a result is confirmed only once reviewed. Withheld when any of the condition's cost is estimated, a spend floor, or missing usage, or nothing was confirmed. |
 
 Each cell's `metrics.json` holds the same numbers under `telemetry`, with
 `decisions` (review calls and failures; a timed-out review is lost gate

@@ -14,6 +14,7 @@ import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr
+from decimal import Decimal
 from pathlib import Path
 from unittest import mock
 
@@ -1297,6 +1298,9 @@ class BenchmarkMetricsTests(unittest.TestCase):
         self.assertEqual(row["cost_usd"], "9.902094")
         self.assertEqual(row["finalization_input_tokens"], 997_494)
         self.assertEqual(row["finalization_cost_usd"], "14.340441")
+        self.assertFalse(row["finalization_cost_estimated"])
+        cell["metrics"]["finalization_tokens"]["cost_estimated"] = True
+        self.assertTrue(benchmark._tokens_for_cell(cell)["finalization_cost_estimated"])
         # A run predating the finalization stamp reports its combined ledger.
         del cell["metrics"]["finalization_tokens"]
         row = benchmark._tokens_for_cell(cell)
@@ -1304,6 +1308,82 @@ class BenchmarkMetricsTests(unittest.TestCase):
         self.assertEqual(row["prompt_estimate_tokens"], 1_900_000)
         self.assertEqual(row["cost_usd"], "24.242535")
         self.assertEqual(row["finalization_input_tokens"], 0)
+
+    def test_cost_per_confirmed_charges_after_wall_review_to_both_sides(self) -> None:
+        """The harness reviews inside its wall; the control only after it.
+
+        Leaving the after-wall review out of the per-result price charged
+        review to the harness alone. The Review column shows the part Cost
+        leaves out, and $ / confirmed includes it on both sides.
+        """
+        def condition(name: str, cost: str, review: str) -> dict:
+            return {
+                "condition": name, "replicates_done": 1, "replicates_total": 1,
+                "cost_usd_total": cost, "review_cost_usd_total": review,
+                "unique_crash_clusters": 10, "unique_finding_clusters": 0,
+                "worker_wall_total": 10800, "wall_median": 10800,
+                "worker_occupancy_median": 0.9, "token_source": "measured",
+            }
+
+        def row(name: str, cost: str, review: str) -> dict:
+            return {
+                "condition": name, "replicate": 1, "experiment": f"{name}-r1",
+                "cell": f"{name}-r1", "cost_usd": cost,
+                "finalization_cost_usd": review, "token_source": "measured",
+                "wall_seconds": 10800,
+            }
+
+        report = {
+            "bench_dir": str(self.root / "review-cost"),
+            "run": {"runid": "r1", "target": "sample", "backend": "claude",
+                    "model": "model", "budget_wall": 10800},
+            "conditions": [condition("harness", "100", "2"),
+                           condition("model-direct", "40", "20")],
+            "token_usage": [row("harness", "100", "2"),
+                            row("model-direct", "40", "20")],
+        }
+        section = benchmark.render_section(report)
+        self.assertIn("| Delegation | Cost | Review |", section)
+        self.assertIn("| $40.0000 | $20.0000 |", section)
+        self.assertIn("| **$40.0000** | **$20.0000** |", section)
+        # (40 + 20) / 10 and (100 + 2) / 10.
+        self.assertIn("| $6 |", section)
+        self.assertIn("| $10 |", section)
+        self.assertEqual(
+            benchmark.cost_with_review({"cost_usd_total": "40", "review_cost_usd_total": ""}),
+            Decimal("40"),
+        )
+        self.assertIsNone(benchmark.cost_with_review({"cost_usd_total": ""}))
+        # An estimated review price is withheld like an estimated wall price.
+        report["conditions"][1]["review_cost_estimated"] = True
+        self.assertNotIn("| $6 |", benchmark.render_section(report))
+        report["conditions"][1]["review_cost_estimated"] = False
+        report["conditions"][1]["token_source"] = "unknown"
+        self.assertNotIn("| $6 |", benchmark.render_section(report))
+        report["conditions"][1]["token_source"] = "measured"
+        report["conditions"][1]["spend_lower_bound"] = True
+        self.assertNotIn("| $6 |", benchmark.render_section(report))
+        report["conditions"][1]["spend_lower_bound"] = False
+        report["conditions"][1]["review_cost_estimated"] = True
+        report["token_usage"][1]["finalization_cost_estimated"] = True
+        section = benchmark.render_section(report)
+        self.assertIn("| $40.0000 | ~$20.0000 |", section)
+        self.assertIn("| **$40.0000** | **~$20.0000** |", section)
+
+    def test_review_cost_preserves_unknown_usage(self) -> None:
+        # A review invocation with no usage contributes zero at known rates,
+        # but its unobserved spend must not become an exact per-result price.
+        totals = benchmark.harvest_tokens(
+            self.root / "unused.jsonl", default_backend="claude",
+            default_model="claude-sonnet-4-6",
+            lines=[json.dumps({"tokens": {}})],
+        )
+        self.assertEqual(totals["token_source"], "unknown")
+        cell = {"metrics": {"finalization_tokens": totals}}
+        self.assertTrue(benchmark._tokens_for_cell(cell)["finalization_cost_estimated"])
+        # No review calls is different from a call whose usage is missing.
+        cell["metrics"]["finalization_tokens"] = {"started_at": "2026-01-01"}
+        self.assertFalse(benchmark._tokens_for_cell(cell)["finalization_cost_estimated"])
 
     def test_wall_token_labels_exclude_failed_finalization_usage(self) -> None:
         with tempfile.TemporaryDirectory() as td:

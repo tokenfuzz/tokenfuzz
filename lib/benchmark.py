@@ -4694,8 +4694,10 @@ def _render_efficiency(
             or c.get("delegation_observable") is False else ""
         )
         per_dollar = (
-            None if c.get("cost_estimated")
-            else _ratio(c.get("cost_usd_total"), confirmed_total)
+            None if c.get("cost_estimated") or c.get("review_cost_estimated")
+            or c.get("spend_lower_bound")
+            or c.get("token_source") == "unknown"
+            else _ratio(cost_with_review(c), confirmed_total)
         )
         lines.append(
             "| {cond} | {occ} | {blocked} | {review} | {filed} | {confirmed} "
@@ -4733,7 +4735,8 @@ def _render_efficiency(
         "which a launch delegated to subagents, or whose backend cannot show "
         "its fan-out at all, so its seat capacity is a floor and the rate an "
         "upper bound) and **$ / confirmed** is "
-        "measured cost per reportable cluster, withheld when any cost is "
+        "measured cost per reportable cluster, after-wall review included, "
+        "withheld when any cost is "
         "estimated or a spend floor. Medians over completed "
         "replicates; an em dash is unrecorded, never zero."
     )
@@ -4844,6 +4847,11 @@ def _tokens_for_cell(cell: dict) -> dict:
         "finalization_input_tokens": _as_nonnegative_int(finalization.get("input_tokens")),
         "finalization_output_tokens": _as_nonnegative_int(finalization.get("output_tokens")),
         "finalization_cost_usd": finalization_cost,
+        "finalization_cost_estimated": bool(
+            finalization.get("cost_estimated") or finalization.get("spend_lower_bound")
+            or finalization.get("estimated")
+            or finalization.get("token_source") in ("estimated", "unknown")
+        ),
         # Observed subagent spawns for the cell; a seat-hour figure is a
         # floor when this is non-zero.
         "delegation_events": (
@@ -4911,6 +4919,26 @@ def _sum_cost_usd(rows: list[dict]) -> str:
         except Exception:
             continue
     return _decimal_text(total) if saw else ""
+
+
+def cost_with_review(condition: dict) -> Decimal | None:
+    """Wall cost plus after-wall review: what one confirmed result cost.
+
+    Only a reviewed artifact is confirmed, and the harness reviews inside
+    its wall while the control is reviewed after it, so a per-result price
+    that left the after-wall review out charged the harness alone for it.
+    """
+    try:
+        cost = Decimal(str(condition.get("cost_usd_total")))
+    except (InvalidOperation, ValueError):
+        return None
+    if not cost.is_finite():
+        return None
+    try:
+        review = Decimal(str(condition.get("review_cost_usd_total") or "0"))
+    except (InvalidOperation, ValueError):
+        review = Decimal(0)
+    return cost + (review if review.is_finite() else Decimal(0))
 
 
 def _cost_source(rows: list[dict]) -> str:
@@ -5384,6 +5412,16 @@ def aggregate(bench_dir: Path, *, include_pool: bool = True) -> dict:
                     r["prompt_estimate_tokens"] for r in token_rows
                 ),
                 "cost_usd_total": _sum_cost_usd(token_rows),
+                # Adjudication of the frozen set after the wall. The harness
+                # reviews inside its wall, so its Cost already carries most of
+                # its review; a direct cell's review all lands here.
+                "review_cost_usd_total": _sum_cost_usd([
+                    {"cost_usd": row.get("finalization_cost_usd")}
+                    for row in token_rows
+                ]),
+                "review_cost_estimated": any(
+                    bool(row.get("finalization_cost_estimated")) for row in token_rows
+                ),
                 "cost_source": _cost_source(token_rows),
                 "cost_estimated": any(
                     bool(row.get("cost_estimated")) for row in token_rows
@@ -6601,10 +6639,10 @@ def render_section(report: dict) -> str:
         lines.append(
             "| Condition | Rep | Experiment | Wall (h) | Source "
             "| Input | Cache write | Cached input | Output | Prompt est. "
-            "| Delegation | Cost |"
+            "| Delegation | Cost | Review |"
         )
         lines.append(
-            "| --- | --: | --- | --: | --- | --: | --: | --: | --: | --: | --: | --: |"
+            "| --- | --: | --- | --: | --- | --: | --: | --: | --: | --: | --: | --: | --: |"
         )
         by_cond: dict[str, list[dict]] = {}
         for row in token_rows:
@@ -6625,7 +6663,7 @@ def render_section(report: dict) -> str:
                 lines.append(
                     "| {cond} | {rep} | {exp} | {wall} | {source} "
                     "| {inp} | {create} | {cached} | {out} | {prompt} "
-                    "| {deleg} | {cost} |".format(
+                    "| {deleg} | {cost} | {review} |".format(
                         cond=label,
                         rep=row.get("replicate") or "—",
                         exp=exp_cell,
@@ -6654,6 +6692,10 @@ def render_section(report: dict) -> str:
                                 row.get("estimated") or row.get("cost_estimated")
                             ),
                         ),
+                        review=_fmt_usd(
+                            row.get("finalization_cost_usd"),
+                            estimated=bool(row.get("finalization_cost_estimated")),
+                        ),
                     )
                 )
             # Per-condition totals — the line an operator compares cost on.
@@ -6663,7 +6705,7 @@ def render_section(report: dict) -> str:
             lines.append(
                 "| **{cond}** | — | **{n} cell{s}** | **{wall}** | {source} "
                 "| **{inp}** | **{create}** | **{cached}** | **{out}** "
-                "| **{prompt}** | **{deleg}** | **{cost}** |".format(
+                "| **{prompt}** | **{deleg}** | **{cost}** | **{review}** |".format(
                     cond=label,
                     n=n,
                     deleg=(
@@ -6685,6 +6727,10 @@ def render_section(report: dict) -> str:
                     out=_fmt_token_approx(agg.get("output_tokens_total"), agg_source),
                     prompt=_fmt_tokens(agg.get("prompt_estimate_tokens_total")),
                     cost=_fmt_cost_cell(agg),
+                    review=_fmt_usd(
+                        agg.get("review_cost_usd_total"),
+                        estimated=bool(agg.get("review_cost_estimated")),
+                    ),
                 )
             )
         lines.append("")
@@ -6729,6 +6775,13 @@ def render_section(report: dict) -> str:
             "Codex rows use OpenAI API-equivalent dollars, including "
             "long-context pricing when a request exceeds 272k input "
             "tokens; the Codex product also reports credits."
+        )
+        lines.append(
+            "> - **Review** — cost of adjudicating the frozen artifact set "
+            "after the wall, left out of **Cost**. `tokenfuzz` reviews most "
+            "artifacts inside its wall, so its **Cost** already carries that "
+            "work, while a direct cell is reviewed entirely here; "
+            "**$ / confirmed** adds this column so both pay for review."
         )
         lines.append(
             "> - **Output** — tokens the model emitted (responses + "
@@ -7551,7 +7604,9 @@ def crosstab(bench_root: Path) -> str:
         "subtracted back out. Review of the frozen artifact set after the "
         "wall is recorded in each cell's `finalization_tokens` and left out "
         "of every token and cost column, so a condition that filed more "
-        "reports is not charged for having them judged."
+        "reports is not charged for having them judged. Each backend's "
+        "ledger shows it as **Review** and adds it to **$ / confirmed**, "
+        "because the harness reviews most artifacts inside its wall."
     )
     lines.append(
         "- **Output** — tokens generated, including tool-call payloads where "

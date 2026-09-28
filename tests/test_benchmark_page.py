@@ -590,6 +590,21 @@ class BuildTests(unittest.TestCase):
         self.assertIsNone(direct["hit_rate"])
         self.assertEqual(direct["wall_share"], 0.5)
 
+    def test_cost_per_confirmed_adds_review_and_marks_uncertain_spend(self) -> None:
+        measured = _condition(
+            "model-direct", unique_crash_clusters=1, cost_usd_total="40",
+            review_cost_usd_total="20",
+        )
+        efficiency = benchmark_page._efficiency(measured)
+        self.assertEqual(efficiency["cost_per_confirmed"], 60.0)
+        self.assertFalse(efficiency["cost_estimated"])
+        # The page marks an uncertain price rather than hiding it.
+        for flag in ("review_cost_estimated", "cost_estimated", "spend_lower_bound"):
+            with self.subTest(flag=flag):
+                uncertain = benchmark_page._efficiency({**measured, flag: True})
+                self.assertEqual(uncertain["cost_per_confirmed"], 60.0)
+                self.assertTrue(uncertain["cost_estimated"])
+
     def test_lane_yield_and_waterfall_reach_the_condition(self) -> None:
         harness = self._cond("harness")
         self.assertEqual(harness["lanes"]["S3"], {"hypotheses": 4, "productive": 2})
