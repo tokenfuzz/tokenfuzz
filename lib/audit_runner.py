@@ -2447,6 +2447,26 @@ def _migrate_cluster_backlog(runtime: Runtime) -> None:
     _write_cluster_marker(sentinel)
 
 
+def _lead_peers(runtime: Runtime) -> list[str]:
+    """Agents eligible for crash-sibling leads: every seat off the S4 lane.
+
+    An open lead holds its owner off new cards, so it would cost the only
+    fuzzing slot its campaign. The analysis seat stays eligible: siblings are
+    source hypotheses, and in measured runs it probed and filed most crashes.
+    """
+    peers = []
+    for agent in range(1, runtime.num_agents + 1):
+        try:
+            lane = (runtime.results / "state" / f"strategy-{agent}").read_text(
+                encoding="utf-8",
+            ).strip().upper()
+        except OSError:
+            lane = ""
+        if lane != _CAMPAIGN_STRATEGY:
+            peers.append(str(agent))
+    return peers
+
+
 def expand_new_crash_clusters(
     runtime: Runtime, *, deadline: float | None = None,
     only: Collection[Path] | None = None,
@@ -2540,6 +2560,7 @@ def expand_new_crash_clusters(
             continue
         result = workqueue.add_cluster_hypotheses(
             context, crash.name, rows, num_agents=runtime.num_agents,
+            peers=_lead_peers(runtime),
         )
         _write_cluster_marker(crash / ".cluster_expanded")
         counts["expanded"] += 1
@@ -2547,7 +2568,7 @@ def expand_new_crash_clusters(
         counts["skipped"] += result["skipped"]
         index_log(
             runtime,
-            f"CLUSTER-EXPAND: {crash.name} agent={result['agent']} "
+            f"CLUSTER-EXPAND: {crash.name} agents={','.join(result['agents']) or '-'} "
             f"added={result['added']} skipped={result['skipped']}",
         )
         for sibling in siblings.get(crash, ()):

@@ -160,7 +160,11 @@ iteration.
     completed call of its kind took; it waits for the final pass instead of
     being cut off without a vote. Cluster expansion (asking the model for
     neighbours of a newly gated crash) runs on its own lane, so a slow
-    decision cannot hold up gating.
+    decision cannot hold up gating. Each neighbour becomes an open lead for
+    the worker holding the fewest open leads, the crash's filer first on a
+    tie. The fuzz-campaign worker takes none, not even its own crash's, so
+    the campaign keeps its slot; with no other worker, the filer keeps them.
+    `bin/state next-card` offers a worker its own lead before any fresh card.
 
 ### Delta audits
 

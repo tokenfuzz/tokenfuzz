@@ -4021,6 +4021,65 @@ class WorkQueueTests(unittest.TestCase):
         claimed = self.run_command(next_card)
         self.assertEqual(json.loads(claimed.stdout)["id"], "WORK-FRESH")
 
+    def test_cluster_leads_go_to_the_least_loaded_agent_owner_first(self) -> None:
+        def leads(crash_id: str, *names: str) -> dict:
+            return workqueue.add_cluster_hypotheses(
+                self.ctx, crash_id,
+                [{"file": "src/app.c", "function": name, "line": 10,
+                  "hypothesis": f"{name} trusts the same length", "category": "bounds"}
+                 for name in names],
+                num_agents=3,
+            )
+
+        first = leads("CRASH-001-2", "app_a", "app_b", "app_c")
+        self.assertEqual((first["agent"], first["agents"]), ("2", ["2", "1", "3"]))
+        # Every agent now holds one open lead; agent 1 closes its lead, so it
+        # is the least loaded, and the owner no longer wins the tie it lost.
+        lead_one = next(
+            row["id"] for row in workqueue.read_jsonl(self.results / "state/hypotheses.jsonl")
+            if row["agent"] == "1"
+        )
+        workqueue.update_hypothesis(self.ctx, lead_one, "DISCARDED", "clean", agent="1")
+        second = leads("CRASH-002-2", "app_d")
+        self.assertEqual(second["agents"], ["1"])
+        # A single-agent run keeps every lead with the owner.
+        single = workqueue.add_cluster_hypotheses(
+            self.ctx, "CRASH-003-2",
+            [{"file": "src/app.c", "function": "app_e", "line": 10,
+              "hypothesis": "app_e trusts the same length", "category": "bounds"}],
+            num_agents=1,
+        )
+        self.assertEqual(single["agents"], ["1"])
+        # Only the named peers share: a campaign or analysis seat is left out.
+        peers = workqueue.add_cluster_hypotheses(
+            self.ctx, "CRASH-004-3",
+            [{"file": "src/app.c", "function": name, "line": 10,
+              "hypothesis": f"{name} trusts the same length", "category": "bounds"}
+             for name in ("app_f", "app_g", "app_h")],
+            num_agents=3, peers=["1"],
+        )
+        self.assertEqual(peers["agents"], ["1", "1", "1"])
+
+    def test_lead_peers_are_the_seats_off_the_campaign_lane(self) -> None:
+        import audit_runner
+        state = self.results / "state"
+        state.mkdir(parents=True, exist_ok=True)
+        (state / "strategy-2").write_text("S4\n", encoding="utf-8")
+        (state / "strategy-1").write_text("S7\n", encoding="utf-8")
+        runtime = SimpleNamespace(results=self.results, num_agents=3, agent_roles=())
+        # Agent 2 runs the campaign; the analysis seat (3) stays eligible.
+        self.assertEqual(audit_runner._lead_peers(runtime), ["1", "3"])
+        # The campaign seat's own crash hands its siblings to the others.
+        leads = workqueue.add_cluster_hypotheses(
+            self.ctx, "CRASH-005-2",
+            [{"file": "src/app.c", "function": name, "line": 10,
+              "hypothesis": f"{name} trusts the same length", "category": "bounds"}
+             for name in ("app_i", "app_j")],
+            num_agents=3, peers=audit_runner._lead_peers(runtime),
+        )
+        self.assertNotIn("2", leads["agents"])
+        self.assertEqual(len(leads["agents"]), 2)
+
     def test_an_operator_pin_rejects_a_hypothesis_from_another_strategy(self) -> None:
         self.write_cards([
             self.card("WORK-S1", "src/one.c", strategy="S1", touched_files=["src/one.c"]),

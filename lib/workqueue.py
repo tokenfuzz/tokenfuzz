@@ -5318,11 +5318,22 @@ def _cluster_owner_agent(crash_id: str, num_agents: int = 0) -> str:
 
 def add_cluster_hypotheses(
     ctx: Context, crash_id: str, rows: list[dict], strategy: str = "",
-    *, num_agents: int = 0,
+    *, num_agents: int = 0, peers: Iterable[str] | None = None,
 ) -> dict:
-    """Route crash-sibling leads into structured state under one JSONL lock."""
+    """Route crash-sibling leads into structured state under one JSONL lock.
+
+    Each lead goes to the agent holding the fewest open cardless leads, the
+    crash's filing agent first on a tie when eligible. Owner-only routing
+    parked every sibling on the one seat that kept crashing while its peers
+    worked cold cards, and leads are taken only at that agent's next
+    `next-card`. `peers` names eligible seats (default: every live agent).
+    With no eligible seat, keep the lead with its filer rather than lose it.
+    """
     init_state(ctx)
     agent = _cluster_owner_agent(crash_id, num_agents)
+    if not num_agents:
+        raw = os.environ.get("NUM_AGENTS", "")
+        num_agents = int(raw) if raw.isdigit() else 0
     hyp_path = state_dir(ctx.results_dir) / "hypotheses.jsonl"
 
     def surface_key(file_field: str, hypothesis: str) -> str:
@@ -5342,6 +5353,22 @@ def add_cluster_hypotheses(
             for row in existing
             if is_active_hypothesis_status(row.get("status", ""))
         }
+        eligible = (
+            [str(number) for number in range(1, num_agents + 1)]
+            if peers is None else [str(peer) for peer in peers]
+        )
+        agents = list(dict.fromkeys(
+            ([agent] if agent in eligible else []) + eligible
+        )) or [agent]
+        load = {name: 0 for name in agents}
+        for row in existing:
+            holder = str(row.get("agent", ""))
+            if (
+                holder in load and not row.get("card_id")
+                and row.get("status", "") in ("PENDING", "INVESTIGATING")
+            ):
+                load[holder] += 1
+        assigned: list[str] = []
         for item in rows[:3]:
             file_path = str(item.get("file", "")).strip() if isinstance(item, dict) else ""
             hypothesis = str(item.get("hypothesis", "")).strip() if isinstance(item, dict) else ""
@@ -5360,7 +5387,11 @@ def add_cluster_hypotheses(
             if key in seen:
                 skipped += 1
                 continue
-            seed = f"{agent}:{file_path}:{hypothesis}:{now}:{added}"
+            # min() keeps the first of equals, and `agents` lists the owner first.
+            holder = min(agents, key=lambda name: load[name])
+            load[holder] += 1
+            assigned.append(holder)
+            seed = f"{holder}:{file_path}:{hypothesis}:{now}:{added}"
             hypothesis_id = "H-" + hashlib.sha1(seed.encode()).hexdigest()[:10]
             counter = 0
             while hypothesis_id in existing_ids:
@@ -5372,7 +5403,7 @@ def add_cluster_hypotheses(
                 hyp_path,
                 {
                     "id": hypothesis_id,
-                    "agent": agent,
+                    "agent": holder,
                     "card_id": "",
                     "hypothesis": hypothesis,
                     "file": file_path,
@@ -5386,14 +5417,14 @@ def add_cluster_hypotheses(
                 },
             )
             added += 1
-    return {"agent": agent, "added": added, "skipped": skipped}
+    return {"agent": agent, "agents": assigned, "added": added, "skipped": skipped}
 
 
 def open_cardless_lead(ctx: Context, agent: str) -> dict | None:
     """Return the agent's oldest open hypothesis that belongs to no card.
 
-    Cluster expansion files its crash-sibling leads this way, owned by the
-    filing agent while that agent's session is still running. A live session
+    Cluster expansion files its crash-sibling leads this way, each owned by
+    the filing agent or a less-loaded peer (see `add_cluster_hypotheses`). A live session
     learns of them only through a queue read; a `next-card` that hands out a
     fresh card over them leaves every lead PENDING until the wall.
     NEEDS_TESTCASE is excluded: it is parked for a reproduce agent, and
