@@ -633,6 +633,8 @@ def invocation_env(
 # session whatever the permission mode.
 _CLAUDE_WEB_TOOLS = ("WebFetch", "WebSearch")
 _CLAUDE_DELEGATION_TOOLS = ("Agent", "Task")
+# Built-in file tools the sandboxed profile never permits (see agent_flags).
+_CLAUDE_FILE_TOOLS = ("Edit", "NotebookEdit", "Write")
 
 # Codex memory-disable controls, added to the flag list when memory is
 # disabled. All are `-c` config overrides rather than `--disable memories`:
@@ -1053,6 +1055,11 @@ def agent_flags(
         disallowed = list(_CLAUDE_WEB_TOOLS)
         if not allow_subagents:
             disallowed += list(_CLAUDE_DELEGATION_TOOLS)
+        if not bypass:
+            # dontAsk below denies these on every call, but a listed tool
+            # still invites the call: one benchmark cell spent 33 turns on
+            # denials before each session fell back to Bash.
+            disallowed += list(_CLAUDE_FILE_TOOLS)
         flags += ["--disallowedTools", ",".join(disallowed)]
         if bypass:
             flags.append("--dangerously-skip-permissions")

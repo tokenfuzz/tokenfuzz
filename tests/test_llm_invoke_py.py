@@ -158,8 +158,8 @@ proc = run(["agent-flags", "claude"], check=True)
 f = flags(proc)
 ok("--print" in f, "claude has --print", f)
 ok("stream-json" in f, "claude has stream-json")
-assert_eq("WebFetch,WebSearch", f[f.index("--disallowedTools") + 1],
-          "claude agent removes the web tools outright; delegation stays at the CLI default")
+assert_eq("WebFetch,WebSearch,Edit,NotebookEdit,Write", f[f.index("--disallowedTools") + 1],
+          "claude agent removes the web tools and the file tools dontAsk would deny; delegation stays at the CLI default")
 bypass = inv.agent_flags("claude", agent_security="external-bypass")
 assert_eq("WebFetch,WebSearch", bypass[bypass.index("--disallowedTools") + 1],
           "claude external-bypass launch denies web too (it carries no settings deny)")
@@ -1157,7 +1157,7 @@ with tempfile.TemporaryDirectory() as td, \
 
 claude_single = inv.agent_flags("claude", allow_subagents=False)
 ok("--disallowedTools" in claude_single, "single-agent Claude disables native delegation")
-assert_eq("WebFetch,WebSearch,Agent,Task", claude_single[claude_single.index("--disallowedTools") + 1],
+assert_eq("WebFetch,WebSearch,Agent,Task,Edit,NotebookEdit,Write", claude_single[claude_single.index("--disallowedTools") + 1],
           "a bounded validator adds both delegation tool names to the standing web deny")
 # Servers the operator's own Codex config declares start outside the command
 # sandbox; every launch disables each one, plus the notify hook. The config is
